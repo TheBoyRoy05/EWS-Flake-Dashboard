@@ -10,6 +10,7 @@ instead of as a slow request.
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -88,7 +89,12 @@ class RuleSection:
 
 @dataclass(frozen=True)
 class Window:
-    """A whole number of UTC days ending at the end of today, matching the trend's buckets."""
+    """The span a page counts over: the last `days` days, ending now.
+
+    Rolling rather than anchored to UTC midnight, which made the shortest window mean "today so
+    far" — an hour of EWS at 01:00 UTC, and a page that read as having no data at all. The trend
+    chart is unaffected, since it buckets by UTC day over TREND_DAYS and never consults a Window.
+    """
 
     days: int
     since: int
@@ -96,7 +102,7 @@ class Window:
 
     @classmethod
     def of_days(cls, days: int) -> 'Window':
-        until = trend.day_bounds(trend.today())[1]
+        until = int(time.time())
         return cls(days=days, since=until - days * 86400, until=until)
 
 

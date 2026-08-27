@@ -8,7 +8,7 @@ import time
 from unittest import mock
 
 from ews_dashboard import config, results
-from ews_dashboard.analysis import false_positive, trend
+from ews_dashboard.analysis import false_positive
 from ews_dashboard.web import app as web_app, formatting
 from tests import fixtures
 
@@ -22,18 +22,16 @@ class WebTest(fixtures.DatabaseTest):
         self.client = web_app.create_app(self.database_path).test_client()
 
     def store_build(self, *arguments: object, **keywords: object) -> int:
-        keywords.setdefault('started_at', trend.day_bounds(trend.today())[0] + 3600)
+        keywords.setdefault('started_at', int(time.time()) - 3600)
         return super().store_build(*arguments, **keywords)
 
     def classify_everything(self, pass_rates: dict) -> None:
-        # Ends at the end of the UTC day, not at now, so a build stamped later today is still in
-        # the window the pages query. Ending at time.time() left the suite failing until 01:00 UTC.
-        today = trend.today()
-        window = (trend.day_bounds(today)[0] - 86400, trend.day_bounds(today)[1])
+        now = int(time.time())
         false_positive.rate(
             self.connection,
             false_positive.live_classifier(self.connection, fixtures.StubHistory(pass_rates)),
-            *window,
+            now - 86400,
+            now,
         )
 
     def record_refresh(self, finished_at: int) -> None:
@@ -47,6 +45,37 @@ class WebTest(fixtures.DatabaseTest):
         response = self.client.get(path)
         self.assertEqual(response.status_code, 200, path)
         return response.get_data(as_text=True)
+
+
+class TestWindow(WebTest):
+    """Anchored to the end of the UTC day, the shortest window meant "today so far": half an hour
+    past midnight it held half an hour of EWS, and every page read as having no data."""
+
+    JUST_AFTER_MIDNIGHT = int(datetime.datetime(2026, 8, 27, 0, 30,
+                                               tzinfo=datetime.timezone.utc).timestamp())
+
+    def test_one_day_reaches_a_full_day_back_from_now(self) -> None:
+        with mock.patch('ews_dashboard.web.app.time.time',
+                        return_value=self.JUST_AFTER_MIDNIGHT):
+            window = web_app.Window.of_days(1)
+        self.assertEqual((window.since, window.until),
+                         (self.JUST_AFTER_MIDNIGHT - 86400, self.JUST_AFTER_MIDNIGHT))
+
+    def test_a_build_from_before_utc_midnight_is_still_in_the_one_day_window_after_it(self) -> None:
+        self.store_build(1, first=['fast/a.html'], second=['fast/a.html'], clean=[],
+                         started_at=self.JUST_AFTER_MIDNIGHT - 3600)
+        with mock.patch('ews_dashboard.web.app.time.time',
+                        return_value=self.JUST_AFTER_MIDNIGHT):
+            page = self.page('/explore?days=1')
+        self.assertNotIn('No failing builds in this window.', page)
+
+    def test_a_build_older_than_the_window_is_left_out(self) -> None:
+        self.store_build(1, first=['fast/a.html'], second=['fast/a.html'], clean=[],
+                         started_at=self.JUST_AFTER_MIDNIGHT - 2 * 86400)
+        with mock.patch('ews_dashboard.web.app.time.time',
+                        return_value=self.JUST_AFTER_MIDNIGHT):
+            page = self.page('/explore?days=1')
+        self.assertIn('No failing builds in this window.', page)
 
 
 class TestLanding(WebTest):
