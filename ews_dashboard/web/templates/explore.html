@@ -1,0 +1,225 @@
+{% extends 'base.html' %}
+{% from 'parts.html' import window_chooser, staleness, rate %}
+
+{% block title %}EWS flake detection — explore{% endblock %}
+
+{% block content %}
+{{ staleness(freshness) }}
+
+<div class="row headline">
+  <div class="col-8">
+    <span class="text large">Explore</span>
+    <span class="text tiny">{% if builder and suite %}{{ builder }}, {{ suite }}{% else %}{{ builder or suite or 'all queues' }}{% endif %}, last {{ window.days }} days</span>
+  </div>
+  <div class="col-4 align-right">{{ window_chooser('explore', window, window_choices, suite=suite, builder=builder) }}</div>
+</div>
+
+<div class="row filters">
+  <div class="col-12">
+    <span class="text tiny">suite</span>
+    <a class="badge{{ ' active' if not suite }}" href="{{ url_for('explore', days=window.days, builder=builder) }}">all</a>
+    {% for choice in suite_choices %}
+    <a class="badge{{ ' active' if choice == suite }}" href="{{ url_for('explore', days=window.days, suite=choice, builder=builder) }}">{{ choice }}</a>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="row metrics">
+  <div class="col-4 metric">
+    <div class="text tiny label">Builds that blamed an author for noise</div>
+    {{ rate(counts.author_fp_rate_pct, counts.partial_fp + counts.false_red, counts.classifiable, 'failing builds') }}
+  </div>
+  <div class="col-4 metric">
+    <div class="text tiny label">Author-visible failures already failing on main</div>
+    {{ rate(counts.blame_noise_rate_pct, counts.surfaced_pre_existing, counts.surfaced_total, 'tests shown') }}
+  </div>
+  <div class="col-4 metric">
+    <div class="text tiny label">Not classified yet</div>
+    <span class="value">{{ counts.unclassified | count }}</span>
+    <span class="text tiny denominator">failing builds awaiting a refresh</span>
+  </div>
+</div>
+
+<div class="panes">
+  <div class="pane queues">
+    <div class="head">
+      <span class="name">Queues</span>
+      <span class="tally">{{ queue_activity | length }}</span>
+    </div>
+    <div class="body">
+      <a class="entry{{ ' selected' if not builder }}" href="{{ url_for('explore', days=window.days, suite=suite) }}">
+        <span class="line"><span class="label">All queues</span></span>
+      </a>
+      {% for queue in queue_activity %}
+      <a class="entry{{ ' selected' if queue.builder == builder }}" href="{{ url_for('explore', days=window.days, suite=suite, builder=queue.builder) }}">
+        <span class="line">
+          <span class="label">{{ queue.builder }}</span>
+          <span class="tally">{{ queue.convictions | count }}</span>
+        </span>
+        <span class="sub">{{ queue.builds_queried | count }} builds asked{% if queue.query_failures %}, {{ queue.query_failures | count }} unanswered{% endif %}</span>
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="pane builds">
+    <div class="head">
+      <span class="name">Failing builds</span>
+      <span class="tally">{{ builds | length }}{% if builds_total > builds | length %} of {{ builds_total | count }}{% endif %}</span>
+    </div>
+    <div class="body">
+      {% if not builds %}
+      <div class="placeholder">No failing builds in this window.</div>
+      {% endif %}
+      {% for summary in builds %}
+      <a class="entry{{ ' selected' if detail and detail.build['build_id'] == summary.build['build_id'] }}{{ ' noise' if summary.state in blames_noise }}" href="{{ url_for('explore', days=window.days, suite=suite, builder=builder, build=summary.build['build_id']) }}">
+        <span class="line">
+          <span class="label">{{ summary.build['builder'] }} #{{ summary.build['build_number'] }}</span>
+          <span class="when">{{ summary.build['started_at'] | moment }}</span>
+        </span>
+        <span class="sub">
+          <span class="state {{ summary.state | state_class }}">{{ summary.state | state }}</span>
+          {% if summary.surfaced_total %}{{ summary.surfaced_total | count }} shown{% endif %}
+        </span>
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="pane detail">
+    {% if not detail %}
+    <div class="head"><span class="name">Build</span></div>
+    <div class="placeholder">Pick a build to see the tests it showed its author, and which of them were already failing on main.</div>
+    {% else %}
+    <div class="breadcrumb">
+      <a href="{{ url_for('explore', days=window.days, suite=suite) }}">all queues</a>
+      <span class="separator">/</span>
+      <a href="{{ url_for('explore', days=window.days, suite=suite, builder=detail.build['builder']) }}">{{ detail.build['builder'] }}</a>
+      <span class="separator">/</span>
+      <a href="{{ links.build(detail.build['builder_id'], detail.build['build_number']) }}">#{{ detail.build['build_number'] }}</a>
+      <span class="state {{ detail.state | state_class }}">{{ detail.state | state }}</span>
+    </div>
+    <div class="kv">
+      <div>
+        <span class="k">Pull request</span>
+        <span class="v">{% if detail.build['pr_id'] %}<a href="{{ links.pull_request(detail.build['pr_id']) }}">PR {{ detail.build['pr_id'] }}</a>{% else %}—{% endif %}</span>
+      </div>
+      <div>
+        <span class="k">Rebased onto</span>
+        <span class="v">{{ detail.build['identifier'] or '—' }}</span>
+      </div>
+      <div>
+        <span class="k">Configuration</span>
+        <span class="v">{{ detail.build['platform'] or '—' }} {{ detail.build['style'] or '' }} {{ detail.build['flavor'] or '' }}</span>
+      </div>
+      <div>
+        <span class="k">Suite</span>
+        <span class="v">{{ detail.build['suite'] }}</span>
+      </div>
+      <div>
+        <span class="k">Started</span>
+        <span class="v">{{ detail.build['started_at'] | moment }}</span>
+      </div>
+      <div>
+        <span class="k">Shown to author</span>
+        <span class="v">{{ detail.tests | length | count }} tests</span>
+      </div>
+    </div>
+    {% if detail.undetermined_reason %}
+    <p class="note">Nothing here could be checked against main: {{ reason_descriptions[detail.undetermined_reason] }}.</p>
+    {% elif not detail.classification %}
+    <p class="note">No refresh has classified this build yet, so nothing below has been looked up.</p>
+    {% endif %}
+    {% if detail.tests %}
+    <form class="filter-form" method="get" action="{{ url_for('explore') }}">
+      <input type="hidden" name="days" value="{{ window.days }}">
+      {% if suite %}<input type="hidden" name="suite" value="{{ suite }}">{% endif %}
+      {% if builder %}<input type="hidden" name="builder" value="{{ builder }}">{% endif %}
+      <input type="hidden" name="build" value="{{ detail.build['build_id'] }}">
+      <input type="search" name="test" value="{{ test_filter or '' }}" placeholder="filter these tests by name" aria-label="Filter tests by name">
+      <button type="submit">Filter</button>
+      {% if test_filter %}<a class="badge" href="{{ url_for('explore', days=window.days, suite=suite, builder=builder, build=detail.build['build_id']) }}">clear</a>{% endif %}
+    </form>
+    {% endif %}
+    <div class="body">
+      {% if not detail.tests %}
+      <div class="placeholder">This build showed its author no new failures.</div>
+      {% elif not detail.matching %}
+      <div class="placeholder">None of the {{ detail.tests | length | count }} tests this build showed its author match “{{ test_filter }}”.</div>
+      {% else %}
+      <table class="table full-width">
+        <thead>
+          <tr><th>Test</th><th>On main</th><th class="numeric">Passes on main</th><th>Why</th></tr>
+        </thead>
+        <tbody>
+          {% for test in detail.matching %}
+          <tr>
+            <td><a href="{{ links.test_history(detail.configuration, test.name) }}">{{ test.name }}</a></td>
+            <td><span class="state {{ test.verdict | state_class }}">{{ test.verdict | state }}</span></td>
+            <td class="numeric">{{ test.pass_rate | percent }}</td>
+            <td class="text tiny">{{ verdict_descriptions[test.verdict] }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="text tiny caption">Only a layout-test run that failed on a pull request against main asks about flakiness, so a queue at zero may simply have had no failing builds, and an api-tests queue never asks at all.</div>
+
+{% for section in rules %}
+<div class="section" id="{{ section.name }}">
+  <div class="header">
+    <div class="title">{{ section.name }}</div>
+    <span class="text tiny">{{ section.description }}</span>
+  </div>
+  <div class="content">
+    {% if not section.convicted.tests %}
+    <div class="placeholder">Nothing convicted under this rule in this window.</div>
+    {% else %}
+    <table class="table full-width">
+      <thead>
+        <tr><th>Test</th><th class="numeric">Convictions</th><th>Queues</th><th class="when">Last seen</th><th>Most recent build</th><th>Pull request</th></tr>
+      </thead>
+      <tbody>
+        {% for test in section.convicted.tests %}
+        <tr>
+          <td>
+            <a href="{{ links.test_history(test.configuration, test.test_name) }}">{{ test.test_name }}</a>
+            <a class="text tiny" href="{{ links.test_investigation(test.configuration, test.test_name) }}">all configurations</a>
+          </td>
+          <td class="numeric">{{ test.convictions | count }}</td>
+          <td>
+            {% if test.queues > 1 %}{{ test.queues }}{% else %}
+            <a href="{{ url_for('explore', days=window.days, suite=suite, builder=test.builder) }}">{{ test.builder }}</a>
+            {% endif %}
+          </td>
+          <td class="when text tiny">{{ test.last_seen | moment }}</td>
+          <td class="text tiny">
+            <a href="{{ links.build(test.builder_id, test.build_number) }}">#{{ test.build_number }}</a>
+          </td>
+          <td class="text tiny">
+            {% if test.pr_id %}<a href="{{ links.pull_request(test.pr_id) }}">PR {{ test.pr_id }}</a>{% else %}—{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if section.convicted.truncated and not rule %}
+    <div class="more">
+      <a class="badge" href="{{ url_for('explore', days=window.days, suite=suite, builder=builder, rule=section.name) }}">Show all {{ section.convicted.total | count }}</a>
+      <span class="text tiny">{{ section.convicted.truncated | count }} more convicted tests are not listed here.</span>
+    </div>
+    {% elif section.convicted.truncated %}
+    <div class="more">
+      <span class="text tiny">Showing the {{ section.limit | count }} most-convicted of {{ section.convicted.total | count }} tests; {{ section.convicted.truncated | count }} more are not listed. Narrow the window, the suite or the queue to see them.</span>
+    </div>
+    {% endif %}
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+{% endblock %}
