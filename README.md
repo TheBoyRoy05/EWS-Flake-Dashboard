@@ -8,6 +8,10 @@ front page — what share of failing builds showed an author a failure that main
 links out to results.webkit.org and EWS for everything else, because both already render this data
 better than a second copy would.
 
+![The Explore page: queues, the failing builds in one queue, and the tests one build showed its author](docs/explore.png)
+
+Behind the front page, Explore narrows left to right — a queue, its failing builds, then one build's author-visible failures with what main says about each and why that verdict was reached. Every filter is a link, so any view is a URL you can send someone.
+
 ## Running it
 
 ```
