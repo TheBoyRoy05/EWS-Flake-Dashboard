@@ -1,4 +1,4 @@
-# ews-flake-detection-dashboard
+# EWS Flake Dashboard
 
 Does EWS's flake detection stop authors being blamed for failures that were not theirs?
 
