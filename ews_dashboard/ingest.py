@@ -413,6 +413,45 @@ def ingest_build(
     return 'reingested' if already_present else 'ingested'
 
 
+def coverage_floor(connection: sqlite3.Connection, builder_name: str) -> Optional[int]:
+    """The oldest timestamp a completed walk of this builder reached, or None if none ever has."""
+    row = connection.execute(
+        'SELECT walked_since FROM builder_coverage WHERE builder = ?', (builder_name,),
+    ).fetchone()
+    return row['walked_since'] if row else None
+
+
+def _settles_the_walk(connection: sqlite3.Connection, builder_name: str,
+                      since: Optional[int]) -> bool:
+    """Whether a run of builds already held may end this walk.
+
+    Below that run sits either history a previous walk fetched or history nobody has ever asked
+    Buildbot for, and only the recorded reach tells the two apart: a queue holding its last fortnight
+    would otherwise stop a 90-day walk two days in and report itself up to date. A walk given no
+    window has no floor to reach, so for it the settled run is the only stopping rule there is.
+    """
+    if since is None:
+        return True
+    floor = coverage_floor(connection, builder_name)
+    return floor is not None and floor <= since
+
+
+def _record_coverage(connection: sqlite3.Connection, builder_name: str,
+                     since: Optional[int]) -> None:
+    """Remember how far back this walk went, keeping the deepest any walk has reached.
+
+    A later narrow walk must not shrink the claim: the builds a 90-day walk stored are still stored
+    once a 14-day one has run over the top of them.
+    """
+    reached = 0 if since is None else since
+    floor = coverage_floor(connection, builder_name)
+    with connection:
+        connection.execute(
+            'INSERT OR REPLACE INTO builder_coverage (builder, walked_since, walked_at) VALUES (?,?,?)',
+            (builder_name, reached if floor is None else min(floor, reached), int(time.time())),
+        )
+
+
 def ingest_builder(
     connection: sqlite3.Connection,
     client: buildbot.BuildbotClient,
@@ -428,7 +467,9 @@ def ingest_builder(
     one builder losing its connection halfway must not end a walk over forty others.
 
     The walk proceeds a page at a time so the log scrapes a page needs can be fetched together, and
-    stops once it has seen a page's worth of builds it already holds.
+    stops once it has seen a page's worth of builds it already holds — but only within a window it
+    has been walked over before, since a run of builds already held says nothing about the history
+    underneath it. A walk that died, or one cut short by `limit`, reached nothing it can claim.
     """
     report = IngestReport()
     suite = suites.suite_for_builder(builder_name)
@@ -437,6 +478,7 @@ def ingest_builder(
 
     try:
         builder_id = client.builder_id(builder_name)
+        settles = _settles_the_walk(connection, builder_name, since)
         stored_in_a_row = 0
         for page in _pages(client.builds(builder_id, since=since, limit=limit)):
             scraped = _scraped_lists(
@@ -453,11 +495,15 @@ def ingest_builder(
                     continue
                 report.record(outcome)
                 stored_in_a_row = stored_in_a_row + 1 if outcome == 'already_present' else 0
-                if stored_in_a_row >= SETTLED_RUN and not force:
+                if stored_in_a_row >= SETTLED_RUN and not force and settles:
                     return report
     except INGEST_ERRORS as error:
         report.errors.append(IngestError.of(builder_name, None, error))
         report.record('builder_failed')
+        return report
+
+    if limit is None:
+        _record_coverage(connection, builder_name, since)
     return report
 
 

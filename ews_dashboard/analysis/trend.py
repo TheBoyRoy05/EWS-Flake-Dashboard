@@ -1,7 +1,7 @@
 """The false-positive rate over time, in daily buckets with a rolling line.
 
 Days are UTC, so a bucket means the same span regardless of who is reading. The rolling value for a
-day sums that day and the six before it rather than averaging the daily percentages, which would
+day sums that day and the days before it rather than averaging their daily percentages, which would
 weight a day with two builds the same as a day with two hundred.
 """
 
@@ -47,25 +47,28 @@ def daily(
     classifier: false_positive.Classifier,
     last_day: datetime.date,
     days: int = 30,
+    rolling: int = ROLLING_DAYS,
     suite: Optional[str] = None,
+    builder: Optional[str] = None,
 ) -> list:
     """One Point per day, oldest first.
 
-    Each day needs the six before it for its rolling value, so the walk starts that much earlier and
-    the extra days are dropped before returning.
+    Each day needs the `rolling - 1` days before it for its rolling value, so the walk starts that
+    much earlier and the extra days are dropped before returning.
     """
-    walked = days_ending(last_day, days + ROLLING_DAYS - 1)
+    walked = days_ending(last_day, days + rolling - 1)
     per_day = []
     for day in walked:
         since, until = day_bounds(day)
-        per_day.append(false_positive.rate(connection, classifier, since, until, suite=suite))
+        per_day.append(false_positive.rate(connection, classifier, since, until,
+                                           suite=suite, builder=builder))
 
     points = []
-    for index in range(ROLLING_DAYS - 1, len(walked)):
-        rolling = false_positive.Counts()
-        for counts in per_day[index - ROLLING_DAYS + 1:index + 1]:
-            rolling.merge(counts)
-        points.append(Point(walked[index], per_day[index], rolling.author_fp_rate_pct))
+    for index in range(rolling - 1, len(walked)):
+        merged = false_positive.Counts()
+        for counts in per_day[index - rolling + 1:index + 1]:
+            merged.merge(counts)
+        points.append(Point(walked[index], per_day[index], merged.author_fp_rate_pct))
     return points
 
 

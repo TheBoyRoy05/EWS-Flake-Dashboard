@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+from typing import Optional
 from unittest import mock
 
 from ews_dashboard import config, ingest, suites
@@ -204,6 +205,67 @@ class TestBuilderWalk(fixtures.DatabaseTest):
         self.assertEqual(report.outcomes['ingested'], 1)
         self.assertEqual(report.failed, 1)
         self.assertIn('build 2', str(report.errors[0]))
+
+
+class TestWalkCoverage(fixtures.DatabaseTest):
+    """A run of builds already held only means the walk has caught up inside a window some earlier
+    walk went all the way through. Otherwise widening the window could never backfill history."""
+
+    WEEK = fixtures.DEFAULT_BUILD_TIME - 7 * 86400
+    FORTNIGHT = fixtures.DEFAULT_BUILD_TIME - 14 * 86400
+    TWO_MONTHS = fixtures.DEFAULT_BUILD_TIME - 60 * 86400
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Only build 5 falls inside a week, both held builds inside a fortnight, everything inside
+        # two months, so each window stops the walk somewhere different.
+        self.held = [fixtures.build(number=5),
+                     fixtures.build(number=4, started_at=fixtures.DEFAULT_BUILD_TIME - 10 * 86400)]
+        self.old = [fixtures.build(number=number,
+                                   started_at=fixtures.DEFAULT_BUILD_TIME - 30 * 86400)
+                    for number in (2, 1)]
+        # Buildbot completes builds out of order, so a build can appear below ones already held.
+        self.straggler = fixtures.build(number=3,
+                                        started_at=fixtures.DEFAULT_BUILD_TIME - 10 * 86400)
+
+    def _walk(self, builds: list, since: int, limit: Optional[int] = None) -> ingest.IngestReport:
+        return ingest.ingest_builder(self.connection, fixtures.WalkableBuildbot(builds),
+                                     fixtures.LAYOUT_BUILDER, since=since, limit=limit)
+
+    def test_a_wider_window_walks_past_the_run_a_narrower_one_stopped_on(self) -> None:
+        everything = self.held + [self.straggler] + self.old
+        with mock.patch.object(ingest, 'SETTLED_RUN', 2):
+            self._walk(self.held, since=self.FORTNIGHT)
+            settled = self._walk(everything, since=self.FORTNIGHT)
+            deeper = self._walk(everything, since=self.TWO_MONTHS)
+        self.assertEqual(settled.outcomes['ingested'], 0)
+        self.assertEqual(deeper.outcomes['ingested'], 3)
+
+    def test_a_narrower_walk_does_not_shrink_the_reach_a_wider_one_earned(self) -> None:
+        """The second walk runs to the end of its own week rather than stopping early, so it is the
+        one that would overwrite the reach it inherited."""
+        with mock.patch.object(ingest, 'SETTLED_RUN', 2):
+            self._walk(self.held + self.old, since=self.TWO_MONTHS)
+            self._walk(self.held + self.old, since=self.WEEK)
+            settled = self._walk(self.held + [self.straggler] + self.old, since=self.TWO_MONTHS)
+        self.assertEqual(settled.outcomes['ingested'], 0)
+
+    def test_a_walk_that_died_claims_none_of_the_window_it_never_finished(self) -> None:
+        with mock.patch.object(ingest, 'SETTLED_RUN', 2):
+            died = ingest.ingest_builder(
+                self.connection,
+                fixtures.HalfDeadBuildbot(self.held, urllib.error.URLError('reset')),
+                fixtures.LAYOUT_BUILDER, since=self.FORTNIGHT,
+            )
+            after = self._walk(self.held + [self.straggler], since=self.FORTNIGHT)
+        self.assertEqual(died.failed, 1)
+        self.assertEqual(after.outcomes['ingested'], 1)
+
+    def test_a_walk_cut_short_by_a_limit_claims_nothing_either(self) -> None:
+        with mock.patch.object(ingest, 'SETTLED_RUN', 2):
+            self._walk(self.held + [self.straggler], since=self.FORTNIGHT, limit=2)
+            after = self._walk(self.held + [self.straggler], since=self.FORTNIGHT)
+        self.assertEqual(after.outcomes['ingested'], 1)
 
 
 class TestFlakinessVerdicts(fixtures.DatabaseTest):

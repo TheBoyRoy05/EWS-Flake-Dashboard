@@ -30,6 +30,7 @@ REPORTED_TABLES = (
     'build_verdicts',
     'flakiness_verdicts',
     'builds_ingested',
+    'builder_coverage',
     'results_summary_cache',
     'build_classifications',
     'refresh_runs',

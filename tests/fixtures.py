@@ -86,7 +86,11 @@ class StubBuildbot:
 
 
 class WalkableBuildbot(StubBuildbot):
-    """Serves one builder's builds, newest first, the way `ingest_builder` walks them."""
+    """Serves one builder's builds, newest first, the way `ingest_builder` walks them.
+
+    `since` and `limit` cut the walk off where the real client does, so a test can hand a builder more
+    history than the window it asks for.
+    """
 
     def __init__(self, builds: list, **kwargs: object) -> None:
         super().__init__(**kwargs)
@@ -97,8 +101,12 @@ class WalkableBuildbot(StubBuildbot):
 
     def builds(self, builder_id: int, since: Optional[int] = None,
                limit: Optional[int] = None) -> Iterator[dict]:
-        for payload in self.builds_available:
+        for yielded, payload in enumerate(self.builds_available, start=1):
+            if since is not None and payload['started_at'] < since:
+                return
             yield payload
+            if limit is not None and yielded >= limit:
+                return
 
 
 class HalfDeadBuildbot(StubBuildbot):

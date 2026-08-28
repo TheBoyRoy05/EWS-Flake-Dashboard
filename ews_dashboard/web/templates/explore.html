@@ -1,5 +1,5 @@
 {% extends 'base.html' %}
-{% from 'parts.html' import window_chooser, staleness, rate %}
+{% from 'parts.html' import window_chooser, suite_chooser, queue_pane, staleness, rate %}
 
 {% block title %}EWS flake detection — explore{% endblock %}
 
@@ -15,13 +15,7 @@
 </div>
 
 <div class="row filters">
-  <div class="col-12">
-    <span class="text tiny">suite</span>
-    <a class="badge{{ ' active' if not suite }}" href="{{ url_for('explore', days=window.days, builder=builder) }}">all</a>
-    {% for choice in suite_choices %}
-    <a class="badge{{ ' active' if choice == suite }}" href="{{ url_for('explore', days=window.days, suite=choice, builder=builder) }}">{{ choice }}</a>
-    {% endfor %}
-  </div>
+  <div class="col-12">{{ suite_chooser('explore', window, suite_choices, suite, builder=builder) }}</div>
 </div>
 
 <div class="row metrics">
@@ -41,26 +35,7 @@
 </div>
 
 <div class="panes">
-  <div class="pane queues">
-    <div class="head">
-      <span class="name">Queues</span>
-      <span class="tally">{{ queue_activity | length }}</span>
-    </div>
-    <div class="body">
-      <a class="entry{{ ' selected' if not builder }}" href="{{ url_for('explore', days=window.days, suite=suite) }}">
-        <span class="line"><span class="label">All queues</span></span>
-      </a>
-      {% for queue in queue_activity %}
-      <a class="entry{{ ' selected' if queue.builder == builder }}" href="{{ url_for('explore', days=window.days, suite=suite, builder=queue.builder) }}">
-        <span class="line">
-          <span class="label">{{ queue.builder }}</span>
-          <span class="tally">{{ queue.convictions | count }}</span>
-        </span>
-        <span class="sub">{{ queue.builds_queried | count }} builds asked{% if queue.query_failures %}, {{ queue.query_failures | count }} unanswered{% endif %}</span>
-      </a>
-      {% endfor %}
-    </div>
-  </div>
+  {{ queue_pane('explore', window, queue_activity, suite, builder) }}
 
   <div class="pane builds">
     <div class="head">

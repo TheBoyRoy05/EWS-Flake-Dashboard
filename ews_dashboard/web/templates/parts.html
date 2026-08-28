@@ -1,8 +1,50 @@
-{% macro window_chooser(endpoint, window, choices, suite=None, builder=None) %}
+{% macro window_chooser(endpoint, window, choices, suite=None, builder=None, rolling=None) %}
 <div class="chooser">
   <span class="text tiny">window</span>
   {% for choice in choices %}
-  <a class="badge{{ ' active' if choice == window.days }}" href="{{ url_for(endpoint, days=choice, suite=suite, builder=builder) }}">{{ choice }}d</a>
+  <a class="badge{{ ' active' if choice == window.days }}" href="{{ url_for(endpoint, days=choice, suite=suite, builder=builder, rolling=rolling) }}">{{ choice }}d</a>
+  {% endfor %}
+</div>
+{% endmacro %}
+
+{% macro suite_chooser(endpoint, window, choices, suite, builder=None, rolling=None) %}
+<div class="chooser start">
+  <span class="text tiny">suite</span>
+  <a class="badge{{ ' active' if not suite }}" href="{{ url_for(endpoint, days=window.days, builder=builder, rolling=rolling) }}">all</a>
+  {% for choice in choices %}
+  <a class="badge{{ ' active' if choice == suite }}" href="{{ url_for(endpoint, days=window.days, suite=choice, builder=builder, rolling=rolling) }}">{{ choice }}</a>
+  {% endfor %}
+</div>
+{% endmacro %}
+
+{% macro queue_pane(endpoint, window, queues, suite, builder, rolling=None) %}
+<div class="pane queues">
+  <div class="head">
+    <span class="name">Queues</span>
+    <span class="tally">{{ queues | length }}</span>
+  </div>
+  <div class="body">
+    <a class="entry{{ ' selected' if not builder }}" href="{{ url_for(endpoint, days=window.days, suite=suite, rolling=rolling) }}">
+      <span class="line"><span class="label">All queues</span></span>
+    </a>
+    {% for queue in queues %}
+    <a class="entry{{ ' selected' if queue.builder == builder }}" href="{{ url_for(endpoint, days=window.days, suite=suite, builder=queue.builder, rolling=rolling) }}">
+      <span class="line">
+        <span class="label">{{ queue.builder }}</span>
+        <span class="tally">{{ queue.convictions | count }}</span>
+      </span>
+      <span class="sub">{{ queue.builds_queried | count }} builds asked{% if queue.query_failures %}, {{ queue.query_failures | count }} unanswered{% endif %}</span>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endmacro %}
+
+{% macro rolling_chooser(endpoint, window, choices, rolling, suite=None, builder=None) %}
+<div class="chooser">
+  <span class="text tiny">rolling average</span>
+  {% for choice in choices %}
+  <a class="badge{{ ' active' if choice == rolling }}" href="{{ url_for(endpoint, days=window.days, suite=suite, builder=builder, rolling=choice) }}">{{ choice }}d</a>
   {% endfor %}
 </div>
 {% endmacro %}

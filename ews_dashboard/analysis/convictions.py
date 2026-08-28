@@ -52,41 +52,6 @@ class QueueActivity:
     query_failures: int
 
 
-def by_rule(connection: sqlite3.Connection, since: int, until: int) -> dict:
-    """Convictions per rule, including rules that never fired, so a zero shows up as a zero."""
-    counted = {
-        row['rule']: row['convictions']
-        for row in connection.execute(
-            f'''SELECT verdict.rule, COUNT(*) AS convictions
-                FROM latest_flakiness_verdicts AS verdict
-                JOIN build_verdicts AS build USING (build_id)
-                WHERE verdict.rule IS NOT NULL AND {WINDOW}
-                GROUP BY verdict.rule''',
-            {'since': since, 'until': until},
-        )
-    }
-    return {rule: counted.get(rule, 0) for rule in config.FLAKINESS_RULES}
-
-
-def builds_queried(connection: sqlite3.Connection, since: int, until: int) -> int:
-    return connection.execute(
-        f'''SELECT COUNT(*) FROM build_verdicts AS build
-            WHERE build.flakiness_query_ran = 1 AND {WINDOW}''',
-        {'since': since, 'until': until},
-    ).fetchone()[0]
-
-
-def query_failures(connection: sqlite3.Connection, since: int, until: int) -> int:
-    """Tests the classifier asked about and got no answer for — the read path's own error rate."""
-    return connection.execute(
-        f'''SELECT COUNT(*)
-            FROM latest_flakiness_verdicts AS verdict
-            JOIN build_verdicts AS build USING (build_id)
-            WHERE verdict.query_failed = 1 AND {WINDOW}''',
-        {'since': since, 'until': until},
-    ).fetchone()[0]
-
-
 def _filters(suite: Optional[str], builder: Optional[str] = None) -> tuple:
     """Extra WHERE clauses for a query that has build_verdicts aliased as `build`, and their
     parameters. Returned together so a caller cannot bind one without the other."""
@@ -98,6 +63,54 @@ def _filters(suite: Optional[str], builder: Optional[str] = None) -> tuple:
         conditions += ' AND build.builder = :builder'
         parameters['builder'] = builder
     return conditions, parameters
+
+
+def _window_parameters(since: int, until: int, suite: Optional[str],
+                       builder: Optional[str]) -> tuple:
+    conditions, parameters = _filters(suite, builder)
+    parameters.update({'since': since, 'until': until})
+    return conditions, parameters
+
+
+def by_rule(connection: sqlite3.Connection, since: int, until: int, suite: Optional[str] = None,
+            builder: Optional[str] = None) -> dict:
+    """Convictions per rule, including rules that never fired, so a zero shows up as a zero."""
+    conditions, parameters = _window_parameters(since, until, suite, builder)
+    counted = {
+        row['rule']: row['convictions']
+        for row in connection.execute(
+            f'''SELECT verdict.rule, COUNT(*) AS convictions
+                FROM latest_flakiness_verdicts AS verdict
+                JOIN build_verdicts AS build USING (build_id)
+                WHERE verdict.rule IS NOT NULL AND {WINDOW}{conditions}
+                GROUP BY verdict.rule''',
+            parameters,
+        )
+    }
+    return {rule: counted.get(rule, 0) for rule in config.FLAKINESS_RULES}
+
+
+def builds_queried(connection: sqlite3.Connection, since: int, until: int,
+                   suite: Optional[str] = None, builder: Optional[str] = None) -> int:
+    conditions, parameters = _window_parameters(since, until, suite, builder)
+    return connection.execute(
+        f'''SELECT COUNT(*) FROM build_verdicts AS build
+            WHERE build.flakiness_query_ran = 1 AND {WINDOW}{conditions}''',
+        parameters,
+    ).fetchone()[0]
+
+
+def query_failures(connection: sqlite3.Connection, since: int, until: int,
+                   suite: Optional[str] = None, builder: Optional[str] = None) -> int:
+    """Tests the classifier asked about and got no answer for — the read path's own error rate."""
+    conditions, parameters = _window_parameters(since, until, suite, builder)
+    return connection.execute(
+        f'''SELECT COUNT(*)
+            FROM latest_flakiness_verdicts AS verdict
+            JOIN build_verdicts AS build USING (build_id)
+            WHERE verdict.query_failed = 1 AND {WINDOW}{conditions}''',
+        parameters,
+    ).fetchone()[0]
 
 
 def convicted_tests(

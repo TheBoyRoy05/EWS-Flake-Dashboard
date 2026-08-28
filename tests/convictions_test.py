@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ews_dashboard import config
+from ews_dashboard import config, suites
 from ews_dashboard.analysis import convictions
 from tests import fixtures
 
@@ -48,6 +48,40 @@ class TestBuildsQueried(fixtures.DatabaseTest):
         self.store_build(1, flaky={})
         self.store_build(2)
         self.assertEqual(convictions.builds_queried(self.connection, *WINDOW), 1)
+
+
+class TestScopedCounts(fixtures.DatabaseTest):
+    """The landing page's cards narrow the same way its rule table and the explore page do, so a
+    reader who picks one queue is not shown a rate computed over every queue."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store_build(1, flaky={'fast/layout.html': config.CLEAN_TREE})
+        self.store_build(2, flaky={'fast/api.html': config.CLEAN_TREE},
+                         query_failed=['fast/unanswered.html'],
+                         builder=fixtures.API_BUILDER, builder_id=9)
+
+    def test_convictions_narrow_to_one_queue(self) -> None:
+        counted = convictions.by_rule(self.connection, *WINDOW, builder=fixtures.API_BUILDER)
+        self.assertEqual(counted[config.CLEAN_TREE], 1)
+        self.assertEqual(sum(convictions.by_rule(self.connection, *WINDOW).values()), 2)
+
+    def test_convictions_narrow_to_one_suite(self) -> None:
+        suite = suites.suite_for_builder(fixtures.API_BUILDER).name
+        counted = convictions.by_rule(self.connection, *WINDOW, suite=suite)
+        self.assertEqual(counted[config.CLEAN_TREE], 1)
+
+    def test_builds_that_asked_narrow_to_one_queue(self) -> None:
+        self.assertEqual(convictions.builds_queried(self.connection, *WINDOW), 2)
+        self.assertEqual(
+            convictions.builds_queried(self.connection, *WINDOW, builder=fixtures.API_BUILDER), 1)
+
+    def test_unanswered_queries_narrow_to_one_queue(self) -> None:
+        self.assertEqual(
+            convictions.query_failures(self.connection, *WINDOW, builder=fixtures.API_BUILDER), 1)
+        self.assertEqual(
+            convictions.query_failures(self.connection, *WINDOW,
+                                       builder=fixtures.LAYOUT_BUILDER), 0)
 
 
 class TestConvictedTests(fixtures.DatabaseTest):

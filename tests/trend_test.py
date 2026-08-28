@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+from typing import Optional
 
 from ews_dashboard import config
 from ews_dashboard.analysis import false_positive, trend
@@ -18,17 +19,19 @@ def _noon(day: datetime.date) -> int:
 
 
 class TestDaily(fixtures.DatabaseTest):
-    def _points(self, days: int = 3) -> list:
+    def _points(self, days: int = 3, rolling: int = trend.ROLLING_DAYS,
+                builder: Optional[str] = None) -> list:
         history = fixtures.StubHistory({'fast/pre.html': UNRELIABLE, 'fast/real.html': RELIABLE})
         return trend.daily(
             self.connection, false_positive.live_classifier(self.connection, history),
-            LAST_DAY, days=days,
+            LAST_DAY, days=days, rolling=rolling, builder=builder,
         )
 
-    def _store_blamed_build(self, number: int, day: datetime.date, blamed: bool = True) -> None:
+    def _store_blamed_build(self, number: int, day: datetime.date, blamed: bool = True,
+                            builder: str = fixtures.LAYOUT_BUILDER, builder_id: int = 7) -> None:
         test_name = 'fast/pre.html' if blamed else 'fast/real.html'
         self.store_build(number, first=[test_name], second=[test_name], clean=[],
-                         started_at=_noon(day))
+                         started_at=_noon(day), builder=builder, builder_id=builder_id)
 
     def test_one_point_per_day_oldest_first(self) -> None:
         points = self._points(days=3)
@@ -68,6 +71,19 @@ class TestDaily(fixtures.DatabaseTest):
         points = self._points(days=2)
         self.assertIsNone(points[0].daily_pct)
         self.assertEqual(points[0].rolling_pct, 100.0)
+
+    def test_a_shorter_rolling_average_forgets_a_day_a_longer_one_still_covers(self) -> None:
+        self._store_blamed_build(1, LAST_DAY - datetime.timedelta(days=4))
+        self.assertEqual(self._points(days=1, rolling=7)[0].rolling_pct, 100.0)
+        self.assertIsNone(self._points(days=1, rolling=3)[0].rolling_pct)
+
+    def test_the_points_count_only_the_queue_they_are_narrowed_to(self) -> None:
+        self._store_blamed_build(1, LAST_DAY)
+        self._store_blamed_build(2, LAST_DAY, blamed=False,
+                                 builder=fixtures.GTK_BUILDER, builder_id=11)
+        self.assertEqual(self._points(days=1)[0].daily_pct, 50.0)
+        self.assertEqual(self._points(days=1, builder=fixtures.LAYOUT_BUILDER)[0].daily_pct, 100.0)
+        self.assertEqual(self._points(days=1, builder=fixtures.GTK_BUILDER)[0].daily_pct, 0.0)
 
 
 class TestDeploymentsWithin(fixtures.DatabaseTest):

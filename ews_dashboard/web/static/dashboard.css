@@ -153,15 +153,47 @@ code {
     align-items: center;
 }
 
-.chooser, .filters .col-12 {
+.chooser {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
     gap: 6px;
+    justify-content: flex-end;
 }
 
-.chooser {
-    justify-content: flex-end;
+.chooser.start {
+    justify-content: flex-start;
+}
+
+.queue-chooser select {
+    max-width: 100%;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--ink);
+    font: inherit;
+    font-size: var(--tiny);
+}
+
+.queue-chooser select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.queue-chooser button {
+    padding: 3px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--panel-raised);
+    color: var(--ink);
+    font: inherit;
+    font-size: var(--tiny);
+    cursor: pointer;
+}
+
+.queue-chooser button:hover {
+    background: var(--panel-hover);
 }
 
 .badge {
@@ -197,10 +229,17 @@ code {
 }
 
 .section > .header {
-    display: block;
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 10px;
     padding: 10px var(--pad);
     background: transparent;
     border-bottom: 1px solid var(--border-soft);
+}
+
+.section > .header .chooser {
+    margin-left: auto;
 }
 
 .section > .header .title {
@@ -300,10 +339,14 @@ code {
 
 /* Drill-down panes: queues, then that queue's builds, then that build's tests */
 
+/* The row caps its own height rather than each body capping itself, because the detail pane spends
+   part of its height on a breadcrumb, a summary and a filter: capping the bodies left the two
+   left-hand panes short of the row the detail pane had stretched. */
 .panes {
     display: flex;
     gap: var(--gap);
     align-items: stretch;
+    max-height: 62vh;
     margin-bottom: var(--gap);
 }
 
@@ -344,7 +387,7 @@ code {
 
 .pane > .body {
     flex: 1 1 auto;
-    max-height: 62vh;
+    min-height: 0;
     overflow-y: auto;
     padding: 6px;
 }
@@ -550,9 +593,12 @@ code {
 
 /* Trend chart */
 
+/* The SVG carries a viewBox and a width but no height, so it scales uniformly to the card it sits
+   in: a fixed height letterboxed the plot into the middle of a wide card instead of filling it. */
 .trend {
     display: block;
-    max-width: 100%;
+    width: 100%;
+    height: auto;
     color: var(--ink);
 }
 
@@ -608,6 +654,14 @@ code {
     background-size: 6px 3px;
 }
 
+.caveats > .content {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gap);
+}
+
 .caveats p {
+    flex: 1 1 340px;
     max-width: 84ch;
+    margin: 0;
 }

@@ -107,6 +107,17 @@ CREATE TABLE IF NOT EXISTS builds_ingested (
 );
 
 
+-- How far back a walk of each builder has actually reached. Without this a run of builds already
+-- held reads as "caught up" whatever window the walk was given, so widening the window could never
+-- backfill: a busy queue holding its last fortnight stopped a 90-day walk inside the first day.
+CREATE TABLE IF NOT EXISTS builder_coverage (
+    builder       TEXT    PRIMARY KEY,
+    -- The oldest timestamp a walk that ran to completion was asked for, 0 for an unbounded one.
+    walked_since  INTEGER NOT NULL,
+    walked_at     INTEGER NOT NULL
+);
+
+
 -- Cached responses from results.webkit.org's results-summary endpoint, which returns nine
 -- outcome percentages summing to 100.
 --

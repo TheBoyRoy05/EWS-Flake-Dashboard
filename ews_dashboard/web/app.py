@@ -21,9 +21,15 @@ from ews_dashboard.analysis import convictions, false_positive, freshness, trend
 from ews_dashboard.web import chart, formatting, links
 
 DEFAULT_WINDOW_DAYS = 7
-WINDOW_CHOICES = (1, 7, 14, 30)
-TREND_DAYS = 30
+WINDOW_CHOICES = (7, 14, 30, 60, 90)
 BUILDS_SHOWN = 200
+
+# How many days each point of the trend line averages over. The window drives the chart's span, so
+# this is the only thing left to choose: a short average shows every spike, a long one shows whether
+# the level moved.
+ROLLING_CHOICES = (3, 7, 14, 28)
+
+SUITE_CHOICES = tuple(suite.name for suite in suites.SUITES)
 
 # A rule's own page lists deeply; the overview lists enough to see the worst offenders and says how
 # many it is holding back, because three full lists put a thousand rows between a reader and the
@@ -112,12 +118,16 @@ def _chosen(name: str, choices: tuple, default: Optional[str] = None) -> Optiona
     return value if value in choices else default
 
 
-def _window() -> Window:
+def _chosen_number(name: str, choices: tuple, default: int) -> int:
     try:
-        days = int(request.args.get('days', DEFAULT_WINDOW_DAYS))
+        value = int(request.args.get(name, default))
     except ValueError:
-        days = DEFAULT_WINDOW_DAYS
-    return Window.of_days(days if days in WINDOW_CHOICES else DEFAULT_WINDOW_DAYS)
+        return default
+    return value if value in choices else default
+
+
+def _window() -> Window:
+    return Window.of_days(_chosen_number('days', WINDOW_CHOICES, DEFAULT_WINDOW_DAYS))
 
 
 def create_app(database_path: Optional[str] = None) -> Flask:
@@ -147,20 +157,55 @@ def create_app(database_path: Optional[str] = None) -> Flask:
     return app
 
 
+@dataclass(frozen=True)
+class Scope:
+    """What both pages narrow by, and the queues a reader can pick from.
+
+    The queue list comes from the window, so `builder` is validated against the queues that have
+    builds in it — a stale link to a queue EWS has since retired narrows nothing rather than
+    emptying the page.
+    """
+
+    suite: Optional[str]
+    builder: Optional[str]
+    queue_activity: list
+
+
+def _scope(open_connection: sqlite3.Connection, window: Window) -> Scope:
+    suite = _chosen('suite', SUITE_CHOICES)
+    activity = convictions.queue_activity(open_connection, window.since, window.until, suite=suite)
+    return Scope(
+        suite=suite,
+        builder=_chosen('builder', tuple(queue.builder for queue in activity)),
+        queue_activity=activity,
+    )
+
+
 def _landing_context(open_connection: sqlite3.Connection, window: Window) -> dict:
+    scope = _scope(open_connection, window)
+    rolling = _chosen_number('rolling', ROLLING_CHOICES, trend.ROLLING_DAYS)
     classifier = false_positive.cached_classifier(open_connection)
-    points = trend.daily(open_connection, classifier, trend.today(), days=TREND_DAYS)
+    points = trend.daily(open_connection, classifier, trend.today(), days=window.days,
+                         rolling=rolling, suite=scope.suite, builder=scope.builder)
     return dict(
         window=window,
         window_choices=WINDOW_CHOICES,
-        counts=false_positive.rate(open_connection, classifier, window.since, window.until),
-        by_rule=convictions.by_rule(open_connection, window.since, window.until),
+        suite=scope.suite,
+        suite_choices=SUITE_CHOICES,
+        builder=scope.builder,
+        queue_activity=scope.queue_activity,
+        rolling=rolling,
+        rolling_choices=ROLLING_CHOICES,
+        counts=false_positive.rate(open_connection, classifier, window.since, window.until,
+                                   suite=scope.suite, builder=scope.builder),
+        by_rule=convictions.by_rule(open_connection, window.since, window.until,
+                                    suite=scope.suite, builder=scope.builder),
         rule_descriptions=config.RULE_DESCRIPTIONS,
-        builds_queried=convictions.builds_queried(open_connection, window.since, window.until),
-        query_failures=convictions.query_failures(open_connection, window.since, window.until),
+        builds_queried=convictions.builds_queried(open_connection, window.since, window.until,
+                                                  suite=scope.suite, builder=scope.builder),
+        query_failures=convictions.query_failures(open_connection, window.since, window.until,
+                                                  suite=scope.suite, builder=scope.builder),
         chart=chart.of_trend(points, trend.deployments_within(points)),
-        trend_days=TREND_DAYS,
-        rolling_days=trend.ROLLING_DAYS,
         threshold_pct=config.PRE_EXISTING_THRESHOLD_PCT,
         freshness=freshness.current(open_connection),
         links=links,
@@ -168,9 +213,8 @@ def _landing_context(open_connection: sqlite3.Connection, window: Window) -> dic
 
 
 def _explore_context(open_connection: sqlite3.Connection, window: Window) -> dict:
-    suite = _chosen('suite', tuple(each.name for each in suites.SUITES))
-    activity = convictions.queue_activity(open_connection, window.since, window.until, suite=suite)
-    builder = _chosen('builder', tuple(queue.builder for queue in activity))
+    scope = _scope(open_connection, window)
+    suite, builder = scope.suite, scope.builder
     test_filter = request.args.get('test') or None
     rule = _chosen('rule', config.FLAKINESS_RULES)
     classifier = false_positive.cached_classifier(open_connection)
@@ -183,8 +227,8 @@ def _explore_context(open_connection: sqlite3.Connection, window: Window) -> dic
         window_choices=WINDOW_CHOICES,
         builder=builder,
         suite=suite,
-        suite_choices=tuple(each.name for each in suites.SUITES),
-        queue_activity=activity,
+        suite_choices=SUITE_CHOICES,
+        queue_activity=scope.queue_activity,
         builds=[BuildSummary(row, classifier(row)) for row in rows],
         builds_total=false_positive.failing_build_count(
             open_connection, window.since, window.until, suite=suite, builder=builder,

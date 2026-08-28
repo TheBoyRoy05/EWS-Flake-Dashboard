@@ -14,16 +14,16 @@ from typing import Optional
 
 from ews_dashboard.analysis import trend
 
-WIDTH = 900
-HEIGHT = 220
-PADDING_LEFT = 42
-PADDING_RIGHT = 14
-PADDING_TOP = 14
-PADDING_BOTTOM = 28
+WIDTH = 1600
+HEIGHT = 320
+PADDING_LEFT = 52
+PADDING_RIGHT = 20
+PADDING_TOP = 18
+PADDING_BOTTOM = 34
 
 GRIDLINE_COUNT = 4
 SMALLEST_Y_MAX_PCT = 10
-DAY_LABEL_EVERY = 7
+DAY_LABELS_WANTED = 8
 
 PLOT_WIDTH = WIDTH - PADDING_LEFT - PADDING_RIGHT
 PLOT_HEIGHT = HEIGHT - PADDING_TOP - PADDING_BOTTOM
@@ -120,6 +120,11 @@ def _x_of_day(index: int, count: int) -> float:
     return _x_of_fraction((index + 0.5) / count)
 
 
+def _label_stride(count: int) -> int:
+    """Days between dated labels, so a 90-day span reads as densely as a 14-day one."""
+    return max(1, math.ceil(count / DAY_LABELS_WANTED))
+
+
 def _deployment_marks(points: list, deployments: list) -> tuple:
     first = trend.day_bounds(points[0].day)[0]
     last = trend.day_bounds(points[-1].day)[1]
@@ -155,7 +160,7 @@ def of_trend(points: list, deployments: Optional[list] = None) -> Chart:
         ),
         day_labels=tuple(
             DayLabel(_x_of_day(index, count), points[index].day.strftime('%b %d'))
-            for index in reversed(range(count - 1, -1, -DAY_LABEL_EVERY))
+            for index in reversed(range(count - 1, -1, -_label_stride(count)))
         ),
         deployments=_deployment_marks(points, deployments or []),
     )

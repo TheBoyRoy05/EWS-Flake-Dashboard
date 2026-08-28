@@ -7,8 +7,8 @@ import re
 import time
 from unittest import mock
 
-from ews_dashboard import config, results
-from ews_dashboard.analysis import false_positive
+from ews_dashboard import config, results, suites
+from ews_dashboard.analysis import false_positive, trend
 from ews_dashboard.web import app as web_app, formatting
 from tests import fixtures
 
@@ -25,12 +25,12 @@ class WebTest(fixtures.DatabaseTest):
         keywords.setdefault('started_at', int(time.time()) - 3600)
         return super().store_build(*arguments, **keywords)
 
-    def classify_everything(self, pass_rates: dict) -> None:
+    def classify_everything(self, pass_rates: dict, days: int = 1) -> None:
         now = int(time.time())
         false_positive.rate(
             self.connection,
             false_positive.live_classifier(self.connection, fixtures.StubHistory(pass_rates)),
-            now - 86400,
+            now - days * 86400,
             now,
         )
 
@@ -48,34 +48,37 @@ class WebTest(fixtures.DatabaseTest):
 
 
 class TestWindow(WebTest):
-    """Anchored to the end of the UTC day, the shortest window meant "today so far": half an hour
-    past midnight it held half an hour of EWS, and every page read as having no data."""
+    """Anchored to the end of the UTC day, a window held less than it claimed: half an hour past
+    midnight the shortest one held half an hour of EWS, and a build from yesterday evening was
+    outside a window said to cover a week."""
 
     JUST_AFTER_MIDNIGHT = int(datetime.datetime(2026, 8, 27, 0, 30,
                                                tzinfo=datetime.timezone.utc).timestamp())
 
-    def test_one_day_reaches_a_full_day_back_from_now(self) -> None:
+    def page_at_midnight(self, path: str) -> str:
         with mock.patch('ews_dashboard.web.app.time.time',
                         return_value=self.JUST_AFTER_MIDNIGHT):
-            window = web_app.Window.of_days(1)
-        self.assertEqual((window.since, window.until),
-                         (self.JUST_AFTER_MIDNIGHT - 86400, self.JUST_AFTER_MIDNIGHT))
+            return self.page(path)
 
-    def test_a_build_from_before_utc_midnight_is_still_in_the_one_day_window_after_it(self) -> None:
-        self.store_build(1, first=['fast/a.html'], second=['fast/a.html'], clean=[],
-                         started_at=self.JUST_AFTER_MIDNIGHT - 3600)
+    def test_a_window_reaches_a_full_span_back_from_now(self) -> None:
         with mock.patch('ews_dashboard.web.app.time.time',
                         return_value=self.JUST_AFTER_MIDNIGHT):
-            page = self.page('/explore?days=1')
-        self.assertNotIn('No failing builds in this window.', page)
+            window = web_app.Window.of_days(7)
+        self.assertEqual((window.since, window.until),
+                         (self.JUST_AFTER_MIDNIGHT - 7 * 86400, self.JUST_AFTER_MIDNIGHT))
+
+    def test_a_build_from_the_far_edge_of_the_window_is_still_inside_it(self) -> None:
+        """Six days and an hour old: inside a rolling week, outside a week that ended at midnight."""
+        self.store_build(1, first=['fast/a.html'], second=['fast/a.html'], clean=[],
+                         started_at=self.JUST_AFTER_MIDNIGHT - 6 * 86400 - 3600)
+        self.assertNotIn('No failing builds in this window.',
+                         self.page_at_midnight('/explore?days=7'))
 
     def test_a_build_older_than_the_window_is_left_out(self) -> None:
         self.store_build(1, first=['fast/a.html'], second=['fast/a.html'], clean=[],
-                         started_at=self.JUST_AFTER_MIDNIGHT - 2 * 86400)
-        with mock.patch('ews_dashboard.web.app.time.time',
-                        return_value=self.JUST_AFTER_MIDNIGHT):
-            page = self.page('/explore?days=1')
-        self.assertIn('No failing builds in this window.', page)
+                         started_at=self.JUST_AFTER_MIDNIGHT - 7 * 86400 - 3600)
+        self.assertIn('No failing builds in this window.',
+                      self.page_at_midnight('/explore?days=7'))
 
 
 class TestLanding(WebTest):
@@ -123,6 +126,64 @@ class TestLanding(WebTest):
         self.assertIn('last 30 days', self.page('/?days=30').lower())
         self.assertIn('last 7 days', self.page('/?days=nonsense').lower())
         self.assertIn('last 7 days', self.page('/?days=9999').lower())
+
+    def test_the_chart_spans_the_window_the_rest_of_the_page_counts_over(self) -> None:
+        self.assertIn('Blame noise over 14 days', self.page('/?days=14'))
+        self.assertIn('Blame noise over 7 days', self.page('/'))
+
+    def rolling_path(self, page: str) -> str:
+        """The rolling line the page drew, which has one point per day the average could cover."""
+        drawn = re.search(r'<path class="rolling" d="([^"]*)"', page)
+        self.assertIsNotNone(drawn, 'the page drew no rolling line')
+        return drawn.group(1)
+
+    def test_a_rolling_average_is_linkable_and_an_unknown_one_falls_back(self) -> None:
+        self.store_build(1, first=['fast/pre.html'], second=['fast/pre.html'], clean=[])
+        self.classify_everything({'fast/pre.html': UNRELIABLE})
+        self.assertIn('14-day rolling', self.page('/?rolling=14'))
+        self.assertIn(f'{trend.ROLLING_DAYS}-day rolling', self.page('/?rolling=5'))
+        self.assertIn(f'{trend.ROLLING_DAYS}-day rolling', self.page('/?rolling=nonsense'))
+
+    def test_a_longer_rolling_average_still_covers_days_a_shorter_one_has_dropped(self) -> None:
+        self.store_build(1, first=['fast/pre.html'], second=['fast/pre.html'], clean=[],
+                         started_at=int(time.time()) - 5 * 86400)
+        self.classify_everything({'fast/pre.html': UNRELIABLE}, days=6)
+        self.assertGreater(self.rolling_path(self.page('/?rolling=14')).count('L'),
+                           self.rolling_path(self.page('/?rolling=3')).count('L'))
+
+    def _blamed_here_clean_elsewhere(self) -> None:
+        """One blamed build on the layout queue, one clean build on another, so a filter that does
+        not narrow and a filter that narrows to the wrong queue both read differently."""
+        self.store_build(1, first=['fast/pre.html'], second=['fast/pre.html'], clean=[])
+        self.store_build(2, first=['fast/real.html'], second=['fast/real.html'], clean=[],
+                         builder=fixtures.GTK_BUILDER, builder_id=11)
+        self.classify_everything({'fast/pre.html': UNRELIABLE, 'fast/real.html': RELIABLE})
+
+    def test_a_queue_filter_narrows_the_cards_and_the_chart(self) -> None:
+        self._blamed_here_clean_elsewhere()
+        whole = self.page('/')
+        self.assertIn('<span class="value">50%</span>', whole)
+        self.assertIn('1 of 2 failing builds', whole)
+        self.assertIn('1 of 2 builds blamed an author for noise', whole)
+
+        narrowed = self.page(f'/?builder={fixtures.GTK_BUILDER}')
+        self.assertIn('<span class="value">0%</span>', narrowed)
+        self.assertIn('0 of 1 failing builds', narrowed)
+        self.assertIn('0 of 1 builds blamed an author for noise', narrowed)
+
+    def test_a_suite_filter_narrows_the_cards_and_the_chart(self) -> None:
+        self.store_build(1, first=['fast/pre.html'], second=['fast/pre.html'], clean=[])
+        self.store_build(2, first=['api/pre.html'], second=['api/pre.html'], clean=[],
+                         builder=fixtures.API_BUILDER, builder_id=9)
+        self.classify_everything({'fast/pre.html': UNRELIABLE, 'api/pre.html': UNRELIABLE})
+        api = suites.suite_for_builder(fixtures.API_BUILDER).name
+        narrowed = self.page(f'/?suite={api}')
+        self.assertIn('1 of 1 failing builds', narrowed)
+        self.assertIn('1 of 1 builds blamed an author for noise', narrowed)
+
+    def test_an_unknown_queue_is_ignored_rather_than_emptying_the_page(self) -> None:
+        self._blamed_here_clean_elsewhere()
+        self.assertIn('1 of 2 failing builds', self.page('/?builder=not-a-queue'))
 
 
 class TestExplore(WebTest):
