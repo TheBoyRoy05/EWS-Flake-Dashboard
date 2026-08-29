@@ -15,7 +15,10 @@ from typing import Optional
 from ews_dashboard.analysis import trend
 
 WIDTH = 1600
-HEIGHT = 320
+# The card is a fixed height — the queue rail's — and the svg scales to fit inside it without
+# distorting, so this aspect ratio only decides how much of that card's width the plot uses. 1600x700
+# fills it at the widths the page is read at.
+HEIGHT = 700
 PADDING_LEFT = 52
 PADDING_RIGHT = 20
 PADDING_TOP = 18

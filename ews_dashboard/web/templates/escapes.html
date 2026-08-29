@@ -1,0 +1,103 @@
+{% extends 'base.html' %}
+{% from 'parts.html' import window_chooser, suite_chooser, queue_pane, staleness, rate %}
+
+{% block title %}EWS flake detection — escapes{% endblock %}
+
+{% block content %}
+{{ staleness(freshness, freshness_dismissed) }}
+
+<div class="row headline">
+  <div class="col-8">
+    <span class="text large">What main said afterwards</span>
+    <span class="text tiny">{% if builder and suite %}{{ builder }}, {{ suite }}{% else %}{{ builder or suite or 'all queues' }}{% endif %}, convictions from the last {{ window.days }} days</span>
+  </div>
+  <div class="col-4 align-right">{{ window_chooser('escaped_regressions', window, window_choices, suite=suite, builder=builder) }}</div>
+</div>
+
+<div class="row filters">
+  <div class="col-12">{{ suite_chooser('escaped_regressions', window, suite_choices, suite, builder=builder) }}</div>
+</div>
+
+<div class="row metrics">
+  <div class="col-4 metric">
+    <div class="text tiny label">Convictions main disagreed with</div>
+    {{ rate(tally.escape_rate_pct, tally.escaped, tally.decided, 'convictions main answered') }}
+  </div>
+  <div class="col-4 metric">
+    <div class="text tiny label">Convictions main answered nothing about</div>
+    <span class="value">{{ tally.undecided | count }}</span>
+    <span class="text tiny denominator">no runs, no baseline, or a moved head</span>
+  </div>
+  <div class="col-4 metric">
+    <div class="text tiny label">Convictions main could not be asked</div>
+    <span class="value">{{ tally.unasked | count }}</span>
+    <span class="text tiny denominator">{{ tally.unaskable['not_landed'] | count }} not landed, {{ tally.unaskable['ambiguous'] | count }} ambiguous, {{ tally.unaskable['unresolved'] | count }} not looked for</span>
+  </div>
+</div>
+
+<div class="scope">
+{{ queue_pane('escaped_regressions', window, queue_activity, suite, builder) }}
+
+<div class="scoped">
+<div class="section">
+  <div class="header">
+    <div class="title">Tests main kept failing after the change landed</div>
+    <div class="text tiny">{{ escaped | length | count }} shown</div>
+  </div>
+  <div class="content">
+    {% if not escaped %}
+    <div class="placeholder">No escapes decided in this window. A conviction can only be checked once its pull request has landed and bots have run the test on main.</div>
+    {% else %}
+    <table class="table full-width">
+      <thead><tr><th>Test</th><th>Rule</th><th>Queue</th><th class="numeric">Failed after</th><th class="when">Landed</th><th>Links</th></tr></thead>
+      <tbody>
+        {% for escape in escaped %}
+        <tr>
+          <td><a href="{{ links.test_history(escape.configuration, escape.test_name) }}">{{ escape.test_name }}</a></td>
+          <td class="text tiny">{{ escape.rule }}</td>
+          <td class="text tiny">{{ escape.builder }}</td>
+          <td class="numeric">{{ escape.failed_after | count }} of {{ escape.runs_after | count }}</td>
+          <td class="when text tiny">{{ escape.landed_at | moment }}</td>
+          <td class="text tiny">
+            <a href="{{ links.build(escape.builder_id, escape.build_number) }}">build</a>
+            {% if escape.pr_id %}<a href="{{ links.pull_request(escape.pr_id) }}">PR {{ escape.pr_id }}</a>{% endif %}
+            <a href="{{ links.test_investigation(escape.configuration, escape.test_name) }}">history</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div>
+</div>
+
+<div class="section">
+  <div class="header"><div class="title">Every conviction main was asked about</div></div>
+  <div class="content">
+    <table class="table full-width">
+      <thead><tr><th>Answer</th><th>Convictions</th><th>Meaning</th></tr></thead>
+      <tbody>
+        {% for verdict in verdicts %}
+        <tr>
+          <td><span class="state {{ verdict | state_class }}">{{ verdict }}</span></td>
+          <td>{{ tally.by_verdict[verdict] | count }}</td>
+          <td class="text tiny">{{ verdict_descriptions[verdict] }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+</div>
+</div>
+
+<div class="section">
+  <div class="header"><div class="title">How to read this</div></div>
+  <div class="content">
+    <div class="caveats text tiny">
+      <p>Every other number on this dashboard is a floor, because main does not contain the change: a test that is reliable on main and was genuinely broken by the change cannot be told apart from one that flaked during the build. Once the change lands that distinction exists, so this page is the only place a conviction can be checked rather than qualified. A conviction is called an escape when main failed the test unexpectedly in {{ failure_pct }}% or more of the runs over the {{ window_days }} days after the landing, having failed none over the {{ window_days }} days before it.</p>
+      <p>This too is a floor. It sees only pull requests whose landing could be pinned down from their title, only tests some bot runs on main in the same configuration, and only the window either side of the landing; a test main already lists as failing is not counted at all. The convictions it could not decide are counted above rather than dropped.</p>
+    </div>
+  </div>
+</div>
+{% endblock %}

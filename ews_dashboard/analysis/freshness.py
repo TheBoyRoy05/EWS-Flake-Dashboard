@@ -68,6 +68,15 @@ class Freshness:
         """
         return self.reason is not None
 
+    @property
+    def signature(self) -> str:
+        """What a dismissal of the banner is remembered against.
+
+        A dismissal must not outlive what it dismissed: hiding "refreshed an hour ago" cannot go on
+        to hide "the last refresh died", so those two carry different signatures.
+        """
+        return f'{self.refreshed_at or 0}:{self.reason or "current"}'
+
 
 def _latest(connection: sqlite3.Connection, sql: str) -> Optional[int]:
     row = connection.execute(sql).fetchone()

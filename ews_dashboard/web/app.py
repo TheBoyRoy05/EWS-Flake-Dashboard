@@ -14,15 +14,21 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from flask import Flask, g, render_template, request
+from flask import Flask, Response, g, redirect, render_template, request, url_for
 
 from ews_dashboard import config, db, results, suites
-from ews_dashboard.analysis import convictions, false_positive, freshness, trend
+from ews_dashboard.analysis import convictions, escapes, false_positive, freshness, trend
 from ews_dashboard.web import chart, formatting, links
 
 DEFAULT_WINDOW_DAYS = 7
 WINDOW_CHOICES = (7, 14, 30, 60, 90)
 BUILDS_SHOWN = 200
+
+# The freshness banner is dismissed by a request rather than in the browser, because this app ships
+# no JavaScript and a dismissal has to hold on the next page too. The cookie holds the signature of
+# what was dismissed, so a banner saying something new is shown again.
+FRESHNESS_COOKIE = 'freshness_dismissed'
+FRESHNESS_DISMISSAL_SECONDS = 30 * 86400
 
 # How many days each point of the trend line averages over. The window drives the chart's span, so
 # this is the only thing left to choose: a short average shows every spike, a long one shows whether
@@ -154,7 +160,34 @@ def create_app(database_path: Optional[str] = None) -> Flask:
     def explore() -> str:
         return render_template('explore.html', **_explore_context(open_database(), _window()))
 
+    @app.route('/escapes')
+    def escaped_regressions() -> str:
+        return render_template('escapes.html', **_escapes_context(open_database(), _window()))
+
+    @app.route('/dismiss-freshness')
+    def dismiss_freshness() -> Response:
+        response = redirect(_internal_target(request.args.get('next')))
+        response.set_cookie(FRESHNESS_COOKIE, request.args.get('state', ''),
+                            max_age=FRESHNESS_DISMISSAL_SECONDS, samesite='Lax')
+        return response
+
     return app
+
+
+def _internal_target(target: Optional[str]) -> str:
+    """Where a dismissal returns to. The target arrives in a query parameter, so anything that is not
+    a path on this app sends the reader back to the overview rather than off the site."""
+    if not target or not target.startswith('/') or target.startswith('//') or '\\' in target:
+        return url_for('landing')
+    return target
+
+
+def _freshness_context(open_connection: sqlite3.Connection) -> dict:
+    current = freshness.current(open_connection)
+    return {
+        'freshness': current,
+        'freshness_dismissed': request.cookies.get(FRESHNESS_COOKIE) == current.signature,
+    }
 
 
 @dataclass(frozen=True)
@@ -207,8 +240,8 @@ def _landing_context(open_connection: sqlite3.Connection, window: Window) -> dic
                                                   suite=scope.suite, builder=scope.builder),
         chart=chart.of_trend(points, trend.deployments_within(points)),
         threshold_pct=config.PRE_EXISTING_THRESHOLD_PCT,
-        freshness=freshness.current(open_connection),
         links=links,
+        **_freshness_context(open_connection),
     )
 
 
@@ -242,8 +275,35 @@ def _explore_context(open_connection: sqlite3.Connection, window: Window) -> dic
         ),
         rules=_rule_sections(open_connection, window, suite, builder, rule),
         rule=rule,
-        freshness=freshness.current(open_connection),
         links=links,
+        **_freshness_context(open_connection),
+    )
+
+
+def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dict:
+    """The escape page: what main did with each convicted test after the change landed.
+
+    Read-only like the others. Deciding an escape needs results.webkit.org and a checkout, so this
+    page shows what the refresh has already decided and says how much it could not.
+    """
+    scope = _scope(open_connection, window)
+    return dict(
+        window=window,
+        window_choices=WINDOW_CHOICES,
+        suite=scope.suite,
+        suite_choices=SUITE_CHOICES,
+        builder=scope.builder,
+        queue_activity=scope.queue_activity,
+        tally=escapes.tally(open_connection, window.since, window.until,
+                            suite=scope.suite, builder=scope.builder),
+        escaped=escapes.escaped(open_connection, window.since, window.until,
+                                suite=scope.suite, builder=scope.builder),
+        verdict_descriptions=escapes.VERDICT_DESCRIPTIONS,
+        verdicts=escapes.VERDICTS,
+        window_days=config.ESCAPE_WINDOW_DAYS,
+        failure_pct=config.ESCAPE_FAILURE_PCT,
+        links=links,
+        **_freshness_context(open_connection),
     )
 
 

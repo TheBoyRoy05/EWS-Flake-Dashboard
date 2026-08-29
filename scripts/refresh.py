@@ -19,8 +19,8 @@ import sys
 import time
 from typing import Optional
 
-from ews_dashboard import buildbot, db, ingest, results
-from ews_dashboard.analysis import false_positive, trend
+from ews_dashboard import buildbot, config, db, ingest, landings, results, webkit_checkout
+from ews_dashboard.analysis import escapes, false_positive, trend
 
 DEFAULT_DAYS = 14
 
@@ -78,6 +78,26 @@ def classify_builds(connection: sqlite3.Connection, history: results.History,
     )
 
 
+def check_escapes(connection: sqlite3.Connection, history: results.History,
+                  since: int, until: int, checkout_path: str) -> None:
+    """Find where each convicted pull request landed, then ask main what it did with the test.
+
+    A checkout that cannot be read stops this pass and nothing else: the builds are already ingested
+    and classified by now, and the convictions it could not decide read as undecided on the page
+    rather than as convictions main agreed with.
+    """
+    try:
+        print('Resolving landings')
+        resolved = landings.resolve(connection, webkit_checkout.Checkout(checkout_path),
+                                    since, until)
+        print(f'  {resolved}')
+        print('Asking main what it did with each convicted test')
+        print(f'  {dict(escapes.assess(connection, history, since, until))}')
+        print(f'  could not be asked: {escapes.unaskable(connection, since, until)}')
+    except webkit_checkout.CheckoutUnavailable as error:
+        print(f'escape detection skipped: {error}', file=sys.stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--days', type=int, default=DEFAULT_DAYS,
@@ -87,6 +107,8 @@ def main() -> int:
                         help='re-read builds already stored, discarding their classifications')
     parser.add_argument('--skip-ingest', action='store_true',
                         help='classify what is already stored without touching Buildbot')
+    parser.add_argument('--skip-escapes', action='store_true',
+                        help='skip the landing search and the check of what main did afterwards')
     parsed = parser.parse_args()
 
     since, until = _window(parsed.days)
@@ -124,6 +146,14 @@ def _refresh(connection: sqlite3.Connection, parsed: argparse.Namespace,
     counts = classify_builds(connection, history, since, until)
     print(f'  {counts.classifiable} classifiable builds, '
           f'{counts.author_fp_rate_pct}% blamed an author for noise')
+
+    checkout_path = config.checkout_path()
+    if parsed.skip_escapes or not checkout_path:
+        print(f'Skipping escape detection; point {config.CHECKOUT_PATH_VARIABLE} at a WebKit '
+              'checkout to enable it')
+    else:
+        check_escapes(connection, history, since, until, checkout_path)
+
     print(f'  results.webkit.org: {dict(history.stats)}')
     return report, builders_walked
 

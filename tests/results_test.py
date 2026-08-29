@@ -269,3 +269,155 @@ class TestAnswer(unittest.TestCase):
     def test_a_warning_counts_towards_the_pass_rate_because_ews_own_check_counts_it(self) -> None:
         self.assertEqual(results.Answer(SUMMARY).pass_rate,
                          SUMMARY['pass'] + SUMMARY['warning'])
+
+
+LANDED_AT = fixtures.DEFAULT_BUILD_TIME
+DAY = 86400
+
+
+def _run(actual: str = 'PASS', commit_at: int = LANDED_AT, order: int = 0,
+         expected: str = 'PASS') -> dict:
+    """One run as the per-run endpoint reports it. `uuid` carries the commit, and nothing else in
+    the response does, so a run's own start time is deliberately later than its commit."""
+    return {
+        'actual': actual, 'expected': expected,
+        'start_time': commit_at + 1800, 'time': 22,
+        'uuid': commit_at * results.UUID_MULTIPLIER + order,
+    }
+
+
+def _group(version_name: str, runs: list) -> dict:
+    return {
+        'configuration': {'platform': 'mac', 'style': 'release', 'flavor': 'wk2',
+                          'version_name': version_name, 'architecture': 'arm64'},
+        'results': runs,
+    }
+
+
+class TestRuns(fixtures.DatabaseTest):
+    """The per-run reader, which is the only endpoint that can say a test began failing at a commit."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.history = results.History(self.connection)
+
+    def _query(self, test_name: str = 'fast/a.html', after: int = LANDED_AT - DAY,
+               before: int = LANDED_AT + DAY) -> results.RunQuery:
+        return results.RunQuery(test_name, CONFIGURATION, after=after, before=before)
+
+    def _age_cache(self, seconds: int) -> None:
+        with self.connection:
+            self.connection.execute('UPDATE test_runs_cache SET fetched_at = ?',
+                                    (int(time.time()) - seconds,))
+
+    def test_runs_are_fetched_once_and_then_read_from_the_cache(self) -> None:
+        payload = [_group('Sequoia', [_run(), _run(order=1)])]
+        with mock.patch('ews_dashboard.results.urllib.request.urlopen',
+                        side_effect=_responder(payload)) as urlopen:
+            self.assertEqual(len(self.history.runs(self._query())), 2)
+            self.assertEqual(len(self.history.runs(self._query())), 2)
+            self.assertEqual(urlopen.call_count, 1)
+            self.assertEqual(self.history.stats['runs_cache_hit'], 1)
+
+    def test_the_window_is_sent_as_commit_timestamps_and_no_branch_is_named(self) -> None:
+        """`branch=main` answers with an empty list rather than an error, because runs for main are
+        partitioned under 'default', and `after_ref` 404s on a commit results.webkit.org has not
+        registered, which is indistinguishable from a test that never ran."""
+        asked: list = []
+
+        def urlopen(request: object, timeout: Optional[int] = None) -> object:
+            asked.append(request.full_url)
+            return _responder([])(request, timeout)
+
+        with mock.patch('ews_dashboard.results.urllib.request.urlopen', side_effect=urlopen):
+            self.history.runs(self._query())
+            url = asked[0]
+            self.assertIn('/api/results/layout-tests/fast/a.html?', url)
+            self.assertIn(f'after_timestamp={LANDED_AT - DAY}', url)
+            self.assertIn(f'before_timestamp={LANDED_AT + DAY}', url)
+            self.assertIn('flavor=wk2', url)
+            self.assertNotIn('branch=', url)
+            self.assertNotIn('after_ref=', url)
+            self.assertNotIn('test=', url)
+
+    def test_every_configuration_group_is_pooled_oldest_commit_first_keeping_its_version(self) -> None:
+        payload = [
+            _group('Tahoe', [_run(commit_at=LANDED_AT + 60)]),
+            _group('Sequoia', [_run(commit_at=LANDED_AT - 60)]),
+        ]
+        with mock.patch('ews_dashboard.results.urllib.request.urlopen',
+                        side_effect=_responder(payload)):
+            runs = self.history.runs(self._query())
+            self.assertEqual([(run.commit_at, run.version_name) for run in runs],
+                             [(LANDED_AT - 60, 'Sequoia'), (LANDED_AT + 60, 'Tahoe')])
+
+    def test_a_runs_commit_is_read_from_its_uuid_rather_than_from_when_it_ran(self) -> None:
+        with mock.patch('ews_dashboard.results.urllib.request.urlopen',
+                        side_effect=_responder([_group('Sequoia', [_run(order=7)])])):
+            run = self.history.runs(self._query())[0]
+            self.assertEqual(run.commit_at, LANDED_AT)
+            self.assertEqual(run.started_at, LANDED_AT + 1800)
+
+    def test_a_test_upstream_has_never_heard_of_caches_as_no_runs_and_is_not_re_asked(self) -> None:
+        with mock.patch('ews_dashboard.results.urllib.request.urlopen',
+                        side_effect=_http_error(404)) as urlopen:
+            self.assertEqual(self.history.runs(self._query()), [])
+            self.assertEqual(self.history.runs(self._query()), [])
+            self.assertEqual(urlopen.call_count, 1)
+
+    def test_an_unreachable_service_is_not_cached_as_a_window_with_no_runs(self) -> None:
+        with mock.patch('ews_dashboard.results.urllib.request.urlopen',
+                        side_effect=urllib.error.URLError('down')):
+            with self.assertRaises(results.HistoryUnavailable):
+                self.history.runs(self._query())
+        self.assertIsNone(results.cached_runs(self.connection, self._query()))
+
+    def test_a_window_that_may_still_be_filling_is_re_asked_and_a_closed_one_is_not(self) -> None:
+        settled = self._query(after=LANDED_AT - 30 * DAY, before=LANDED_AT - 29 * DAY)
+        with mock.patch('ews_dashboard.results.urllib.request.urlopen',
+                        side_effect=_responder([_group('Sequoia', [_run()])])) as urlopen:
+            self.history.runs(settled)
+            self._age_cache(results.RUNS_TTL_SECONDS + 60)
+            self.history.runs(settled)
+            self.assertEqual(urlopen.call_count, 1)
+
+        recent = self._query(after=int(time.time()) - DAY, before=int(time.time()))
+        with mock.patch('ews_dashboard.results.urllib.request.urlopen',
+                        side_effect=_responder([_group('Sequoia', [_run()])])) as urlopen:
+            self.history.runs(recent)
+            self._age_cache(results.RUNS_TTL_SECONDS + 60)
+            self.history.runs(recent)
+            self.assertEqual(urlopen.call_count, 2)
+
+
+class TestRun(unittest.TestCase):
+    def test_a_warning_is_not_a_failure_because_the_pass_rate_counts_it_as_a_pass(self) -> None:
+        warned = results.Run(actual='WARNING', expected='PASS', started_at=LANDED_AT,
+                             commit_at=LANDED_AT, version_name='Sequoia')
+        self.assertFalse(warned.failed)
+        self.assertFalse(warned.unexpected)
+
+    def test_a_failure_the_expectations_allow_is_a_failure_but_not_an_unexpected_one(self) -> None:
+        expected = results.Run(actual='TEXT', expected='TEXT PASS', started_at=LANDED_AT,
+                               commit_at=LANDED_AT, version_name='Sequoia')
+        self.assertTrue(expected.failed)
+        self.assertFalse(expected.unexpected)
+
+    def test_a_failure_no_expectation_allows_is_unexpected(self) -> None:
+        broken = results.Run(actual='TEXT', expected='PASS', started_at=LANDED_AT,
+                             commit_at=LANDED_AT, version_name='Sequoia')
+        self.assertTrue(broken.failed)
+        self.assertTrue(broken.unexpected)
+
+
+class TestCachedRuns(fixtures.DatabaseTest):
+    """What a page gets: the cache alone, and never a request."""
+
+    def test_a_window_nobody_has_asked_about_reads_as_no_answer_rather_than_as_no_runs(self) -> None:
+        query = results.RunQuery('fast/a.html', CONFIGURATION, after=LANDED_AT, before=LANDED_AT + DAY)
+
+        def forbidden(request: object, timeout: Optional[int] = None) -> object:
+            raise AssertionError(f'cached_runs reached the network for {request}')
+
+        with mock.patch('ews_dashboard.results.urllib.request.urlopen', side_effect=forbidden):
+            self.assertIsNone(results.cached_runs(self.connection, query))

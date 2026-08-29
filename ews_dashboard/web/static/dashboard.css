@@ -165,35 +165,28 @@ code {
     justify-content: flex-start;
 }
 
-.queue-chooser select {
-    max-width: 100%;
-    padding: 3px 8px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--panel);
-    color: var(--ink);
-    font: inherit;
-    font-size: var(--tiny);
+/* The overview reads left to right the way the explore page does: the queue rail picks what
+   everything to its right is about. The rail starts level with the first card beside it, caps at the
+   height the explore page's panes use, and sticks, so a page whose right column runs to several
+   screens never scrolls the choice out of reach. */
+
+.scope {
+    display: flex;
+    gap: var(--gap);
+    align-items: flex-start;
+    min-width: 0;
 }
 
-.queue-chooser select:focus {
-    outline: none;
-    border-color: var(--accent);
+.scope > .pane.queues {
+    position: sticky;
+    top: var(--gap);
+    max-height: 62vh;
+    margin-bottom: var(--gap);
 }
 
-.queue-chooser button {
-    padding: 3px 12px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--panel-raised);
-    color: var(--ink);
-    font: inherit;
-    font-size: var(--tiny);
-    cursor: pointer;
-}
-
-.queue-chooser button:hover {
-    background: var(--panel-hover);
+.scoped {
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 .badge {
@@ -462,25 +455,26 @@ code {
     vertical-align: 0.1em;
 }
 
-.state-CLEAN, .state-real {
+.state-CLEAN, .state-real, .state-CONTAINED {
     background: var(--good-bg);
     border-color: rgba(95, 203, 142, 0.32);
     color: var(--good);
 }
 
-.state-PARTIAL_FP, .state-no_history {
+.state-PARTIAL_FP, .state-no_history, .state-FLAKY_ON_MAIN {
     background: var(--warn-bg);
     border-color: rgba(227, 171, 99, 0.32);
     color: var(--warn);
 }
 
-.state-FALSE_RED, .state-pre_existing {
+.state-FALSE_RED, .state-pre_existing, .state-ESCAPED {
     background: var(--bad-bg);
     border-color: rgba(242, 120, 110, 0.32);
     color: var(--bad);
 }
 
-.state-UNDETERMINED, .state-unqueried, .state-unknown, .state-no_surfaced {
+.state-UNDETERMINED, .state-unqueried, .state-unknown, .state-no_surfaced,
+.state-ALREADY_FAILING, .state-NO_RUNS, .state-NO_BASELINE, .state-TREE_DIVERGED {
     background: var(--panel-raised);
     border-color: var(--border);
     color: var(--muted);
@@ -576,6 +570,9 @@ code {
 /* Freshness banner */
 
 .freshness {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
     margin: var(--gap) 0 0;
     padding: 7px 12px;
     border-radius: var(--radius-small);
@@ -583,6 +580,24 @@ code {
     background: var(--panel);
     color: var(--muted);
     font-size: var(--tiny);
+}
+
+.freshness .message {
+    flex: 1 1 auto;
+}
+
+.freshness .dismiss {
+    flex: 0 0 auto;
+    cursor: pointer;
+    padding: 0 4px;
+    font-size: 14px;
+    line-height: 1;
+    color: var(--faint);
+}
+
+.freshness .dismiss:hover {
+    color: var(--ink);
+    text-decoration: none;
 }
 
 .freshness.stale {
@@ -593,12 +608,26 @@ code {
 
 /* Trend chart */
 
-/* The SVG carries a viewBox and a width but no height, so it scales uniformly to the card it sits
-   in: a fixed height letterboxed the plot into the middle of a wide card instead of filling it. */
+/* The chart card is exactly as tall as the queue rail beside it, so the row reads as one band. The
+   svg fills that card rather than deciding its own height from the viewBox. */
+.section.chart {
+    display: flex;
+    flex-direction: column;
+    height: 62vh;
+}
+
+.section.chart > .content {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    flex: 1 1 auto;
+}
+
 .trend {
     display: block;
     width: 100%;
-    height: auto;
+    flex: 1 1 auto;
+    min-height: 0;
     color: var(--ink);
 }
 
@@ -654,14 +683,27 @@ code {
     background-size: 6px 3px;
 }
 
-.caveats > .content {
+/* The rules table and the caveats share one card: how to read a conviction count is part of reading
+   it, and as its own card the qualification sat a screen below the number it qualified. */
+.caveats {
     display: flex;
     flex-wrap: wrap;
     gap: var(--gap);
+    margin-top: var(--pad);
+    padding-top: var(--pad);
+    border-top: 1px solid var(--border-soft);
 }
 
 .caveats p {
     flex: 1 1 340px;
     max-width: 84ch;
     margin: 0;
+}
+
+/* Its own card on the escape page, where the method is long enough to read as a footnote rather than
+   as part of the table above it. */
+.section > .content > .caveats:first-child {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
 }

@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 BUILDBOT_URL = 'https://ews-build.webkit.org'
 RESULTS_URL = 'https://results.webkit.org'
@@ -15,9 +16,21 @@ RESULTS_URL = 'https://results.webkit.org'
 DATABASE_PATH_VARIABLE = 'EWS_DASHBOARD_DATABASE'
 DEFAULT_DATABASE_NAME = 'ews-dashboard.db'
 
+CHECKOUT_PATH_VARIABLE = 'EWS_DASHBOARD_CHECKOUT'
+
 # A test passing this often or less on main already fails without the change, so a failure here is
 # not the author's doing.
 PRE_EXISTING_THRESHOLD_PCT = 80
+
+# How long after a change lands main is watched for the test a build called flaky, and how long
+# before it lands is read as the baseline. Three days matches the window EWS's own rules use, so a
+# test convicted for flaking over three days is checked over the same span.
+ESCAPE_WINDOW_DAYS = 3
+
+# What share of a test's post-landing runs on main must fail unexpectedly before the failure is a
+# regression rather than the flakiness the build was told it was. Below this the conviction is
+# corroborated: the test really does fail some of the time on main.
+ESCAPE_FAILURE_PCT = 50
 
 # Above this many author-visible failures the build is a crash storm, not a set of test results;
 # classifying it test-by-test would cost hundreds of lookups to describe a broken checkout.
@@ -69,3 +82,12 @@ def database_path() -> str:
         return from_environment
     return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         DEFAULT_DATABASE_NAME)
+
+
+def checkout_path() -> Optional[str]:
+    """A WebKit checkout to read landings from, or None when the refresh has not been given one.
+
+    There is no default. A path guessed wrong reads as thousands of pull requests that never landed,
+    which is indistinguishable on a page from thousands that really did not.
+    """
+    return os.environ.get(CHECKOUT_PATH_VARIABLE) or None

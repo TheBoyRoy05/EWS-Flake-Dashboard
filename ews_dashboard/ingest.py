@@ -392,6 +392,7 @@ def ingest_build(
         'builder_id': builder_id,
         'build_number': build_number,
         'pr_id': int(pull_request) if pull_request else None,
+        'pr_title': _text_property(properties, 'github.title'),
         'sha': _text_property(properties, 'github.head.sha'),
         'change_id': _text_property(properties, 'change_id'),
         'identifier': _text_property(properties, 'identifier'),

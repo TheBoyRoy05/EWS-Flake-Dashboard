@@ -49,10 +49,16 @@
 </div>
 {% endmacro %}
 
-{% macro staleness(freshness) %}
+{% macro staleness(freshness, dismissed=False) %}
+{# Dismissal is a request, not a click handler: this app ships no JavaScript, and a dismissal has to
+   hold across pages. The signature travels with it so a banner that starts saying something else
+   comes back. #}
+{% if not dismissed %}
 <div class="freshness {{ 'stale' if freshness.stale }}">
-  Refreshed {{ freshness.refresh_age_seconds | age }}{% if freshness.newest_build_at %}, newest build {{ freshness.newest_build_at | moment }}{% endif %}{% if freshness.reason == 'never_refreshed' %} — nothing has refreshed this database yet, so every number below is over an empty or partial window{% elif freshness.reason == 'refresh_failed' %} — the last refresh died and never finished: {{ freshness.failure }}{% elif freshness.reason == 'refresh_overdue' %} — older than the refresh interval, so read the numbers below as a lower bound{% elif freshness.reason == 'classification_behind' %} — builds are ingested but classification is {{ freshness.classification_lag_seconds | age }} behind them, so recent builds count as unclassified rather than clean{% endif %}.
+  <span class="message">Refreshed {{ freshness.refresh_age_seconds | age }}{% if freshness.newest_build_at %}, newest build {{ freshness.newest_build_at | moment }}{% endif %}{% if freshness.reason == 'never_refreshed' %} — nothing has refreshed this database yet, so every number below is over an empty or partial window{% elif freshness.reason == 'refresh_failed' %} — the last refresh died and never finished: {{ freshness.failure }}{% elif freshness.reason == 'refresh_overdue' %} — older than the refresh interval, so read the numbers below as a lower bound{% elif freshness.reason == 'classification_behind' %} — builds are ingested but classification is {{ freshness.classification_lag_seconds | age }} behind them, so recent builds count as unclassified rather than clean{% endif %}.</span>
+  <a class="dismiss" href="{{ url_for('dismiss_freshness', state=freshness.signature, next=request.full_path) }}" title="Dismiss until this changes" aria-label="Dismiss">&times;</a>
 </div>
+{% endif %}
 {% endmacro %}
 
 {% macro rate(value, part, whole, unit) %}

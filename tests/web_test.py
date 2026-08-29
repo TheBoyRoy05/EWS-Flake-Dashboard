@@ -6,9 +6,10 @@ import datetime
 import re
 import time
 from unittest import mock
+from urllib.parse import parse_qs, quote, urlsplit
 
 from ews_dashboard import config, results, suites
-from ews_dashboard.analysis import false_positive, trend
+from ews_dashboard.analysis import escapes, false_positive, freshness, trend
 from ews_dashboard.web import app as web_app, formatting
 from tests import fixtures
 
@@ -114,6 +115,48 @@ class TestLanding(WebTest):
         for rule in config.FLAKINESS_RULES:
             self.assertIn(rule, page)
 
+
+class TestFreshnessDismissal(WebTest):
+    """Dismissing the freshness banner is a request rather than a click handler, since the app ships
+    no JavaScript and a banner hidden on one page has to stay hidden on the next."""
+
+    BANNER = 'class="freshness'
+
+    def dismiss_link(self, path: str = '/') -> str:
+        found = re.search(r'<a class="dismiss" href="([^"]+)"', self.page(path))
+        self.assertIsNotNone(found, f'no dismissal control on {path}')
+        return found.group(1).replace('&amp;', '&')
+
+    def test_the_control_names_what_it_dismisses_and_where_it_returns(self) -> None:
+        link = urlsplit(self.dismiss_link('/explore?days=14'))
+        self.assertEqual(link.path, '/dismiss-freshness')
+        arguments = parse_qs(link.query)
+        self.assertEqual(arguments['state'], [freshness.current(self.connection).signature])
+        self.assertEqual(arguments['next'], ['/explore?days=14'])
+
+    def test_dismissing_returns_to_the_page_it_was_dismissed_from(self) -> None:
+        response = self.client.get(self.dismiss_link('/explore?days=14'))
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.headers['Location'].endswith('/explore?days=14'),
+                        response.headers['Location'])
+
+    def test_a_dismissal_holds_on_every_page_and_not_only_the_one_it_was_made_from(self) -> None:
+        self.client.get(self.dismiss_link('/'))
+        self.assertNotIn(self.BANNER, self.page('/'))
+        self.assertNotIn(self.BANNER, self.page('/explore'))
+
+    def test_a_dismissal_does_not_outlive_the_banner_it_dismissed(self) -> None:
+        """Hiding "nothing has refreshed this database yet" must not go on to hide a refresh that
+        died, so the banner comes back once it has something else to say."""
+        self.client.get(self.dismiss_link('/'))
+        self.record_refresh(int(time.time()) - 300)
+        self.assertIn(self.BANNER, self.page('/'))
+
+    def test_a_dismissal_cannot_send_a_reader_off_the_site(self) -> None:
+        for target in ('https://example.com/', '//example.com/', '/\\example.com'):
+            response = self.client.get(f'/dismiss-freshness?state=x&next={quote(target)}')
+            self.assertEqual(response.headers['Location'], '/', target)
+
     def test_the_trend_is_drawn_as_inline_svg_with_hover_titles(self) -> None:
         self.store_build(1, first=['fast/pre.html'], second=['fast/pre.html'], clean=[])
         self.classify_everything({'fast/pre.html': UNRELIABLE})
@@ -184,6 +227,24 @@ class TestLanding(WebTest):
     def test_an_unknown_queue_is_ignored_rather_than_emptying_the_page(self) -> None:
         self._blamed_here_clean_elsewhere()
         self.assertIn('1 of 2 failing builds', self.page('/?builder=not-a-queue'))
+
+    def rail_link_to(self, page: str, builder: str) -> str:
+        """The href of the queue rail's entry for one queue."""
+        entry = re.search(rf'<a class="entry[^"]*" href="([^"]*{re.escape(builder)}[^"]*)"', page)
+        self.assertIsNotNone(entry, f'the rail listed no entry for {builder}')
+        return entry.group(1)
+
+    def test_the_queue_rail_keeps_the_rest_of_the_scope_in_its_links(self) -> None:
+        self._blamed_here_clean_elsewhere()
+        link = self.rail_link_to(self.page('/?days=14&rolling=3'), fixtures.GTK_BUILDER)
+        self.assertIn('days=14', link)
+        self.assertIn('rolling=3', link)
+
+    def test_the_chosen_queue_is_marked_in_the_rail_and_another_is_not(self) -> None:
+        self._blamed_here_clean_elsewhere()
+        page = self.page(f'/?builder={fixtures.GTK_BUILDER}')
+        self.assertRegex(page, rf'class="entry selected" href="[^"]*{re.escape(fixtures.GTK_BUILDER)}')
+        self.assertNotRegex(page, rf'class="entry selected" href="[^"]*{re.escape(fixtures.LAYOUT_BUILDER)}')
 
 
 class TestExplore(WebTest):
@@ -351,6 +412,71 @@ class TestExploreDrillDown(WebTest):
         self.assertIn(f'<span class="state state-{formatting.NO_SURFACED}">'
                       f'{formatting.BUCKET_WORDS[formatting.NO_SURFACED]}</span>', page)
         self.assertNotIn('<span class="state state-unknown">unclassified</span>', page)
+
+
+class TestEscapes(WebTest):
+    """The escape page, which shows what main did with a convicted test after the change landed."""
+
+    def _stored_escape(self, build_id: int, test_name: str, verdict: str,
+                       failed_after: int = 3, runs_after: int = 3) -> None:
+        with self.connection:
+            self.connection.execute(
+                '''INSERT INTO escape_verdicts (
+                    build_id, test_name, verdict, runs_before, failed_before, runs_after,
+                    failed_after, window_ends_at, decided_at
+                ) VALUES (?,?,?,?,?,?,?,?,?)''',
+                (build_id, test_name, verdict, 4, 0, runs_after, failed_after,
+                 int(time.time()), int(time.time())),
+            )
+
+    def test_a_window_with_nothing_decided_says_so_rather_than_reading_as_no_escapes(self) -> None:
+        self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1, pr_title='One')
+        page = self.page('/escapes')
+        self.assertIn('No escapes decided in this window', page)
+        self.assertIn('1 not looked for', page)
+
+    def test_an_escape_is_listed_with_the_runs_behind_it(self) -> None:
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=72555,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
+        page = self.page('/escapes')
+        self.assertIn('fast/a.html', page)
+        self.assertIn('3 of 3', page)
+        self.assertIn('pull/72555', page)
+
+    def test_the_rate_is_over_what_main_answered_and_not_over_every_conviction(self) -> None:
+        """A conviction main ran nothing about belongs in no denominator: counting it would report
+        an escape rate that falls as coverage falls."""
+        first = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                 pr_title='One')
+        second = self.store_build(2, flaky={'fast/b.html': config.CLEAN_TREE}, pr_id=2,
+                                  pr_title='Two')
+        third = self.store_build(3, flaky={'fast/c.html': config.CLEAN_TREE}, pr_id=3,
+                                 pr_title='Three')
+        self._stored_escape(first, 'fast/a.html', escapes.ESCAPED)
+        self._stored_escape(second, 'fast/b.html', escapes.CONTAINED, failed_after=0)
+        self._stored_escape(third, 'fast/c.html', escapes.NO_RUNS, failed_after=0, runs_after=0)
+        page = self.page('/escapes')
+        self.assertIn('<span class="value">50%</span>', page)
+        self.assertIn('1 of 2 convictions main answered', page)
+
+    def test_serving_the_page_never_reaches_results_webkit_org(self) -> None:
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
+        with mock.patch('ews_dashboard.results.urllib.request.urlopen',
+                        side_effect=AssertionError('a page made an HTTP request')):
+            self.assertEqual(self.client.get('/escapes').status_code, 200)
+
+    def test_a_queue_that_convicted_nothing_escaping_shows_the_page_narrowed(self) -> None:
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
+        self.store_build(2, flaky={'fast/b.html': config.CLEAN_TREE}, builder=fixtures.GTK_BUILDER,
+                         builder_id=9, pr_id=2, pr_title='Two')
+        page = self.page(f'/escapes?builder={fixtures.GTK_BUILDER}')
+        self.assertNotIn('fast/a.html', page)
+        self.assertIn('No escapes decided in this window', page)
 
 
 class TestReadOnly(WebTest):

@@ -20,16 +20,27 @@ REFRESH_RUNS_WITH_ERROR = ('    builds_failed    INTEGER NOT NULL DEFAULT 0,\n'
                            '    error            TEXT\n')
 REFRESH_RUNS_WITHOUT_ERROR = '    builds_failed    INTEGER NOT NULL DEFAULT 0\n'
 
+PR_TITLE_COLUMN = (
+    "    -- The pull request's title, which is the only thing a build and the commit it landed as have in\n"
+    '    -- common: a landed message names its bug and its radar, never its pull request.\n'
+    '    pr_title                    TEXT,\n'
+)
+
 A_MIGRATION_THAT_CANNOT_BE_REPLAYED = 'ALTER TABLE build_verdicts ADD COLUMN builder TEXT'
 
 
-def _schema_before_the_error_column() -> str:
-    """schema.sql as it stood before MIGRATIONS[0], which is what an un-upgraded database holds."""
+def _schema_before_the_migrations() -> str:
+    """schema.sql with every migrated column taken back out, which is what an un-upgraded database
+    holds. Each removal is checked, so a schema.sql edit that outgrows this fails here rather than
+    quietly leaving the migrations untested."""
     with open(db.SCHEMA_PATH) as schema_file:
         schema = schema_file.read()
-    if REFRESH_RUNS_WITH_ERROR not in schema:
-        raise AssertionError('schema.sql no longer declares refresh_runs.error the way this undoes it')
-    return schema.replace(REFRESH_RUNS_WITH_ERROR, REFRESH_RUNS_WITHOUT_ERROR)
+    for declared, without in ((REFRESH_RUNS_WITH_ERROR, REFRESH_RUNS_WITHOUT_ERROR),
+                              (PR_TITLE_COLUMN, '')):
+        if declared not in schema:
+            raise AssertionError(f'schema.sql no longer declares this the way this undoes it:\n{declared}')
+        schema = schema.replace(declared, without)
+    return schema
 
 
 class TestInitialize(unittest.TestCase):
@@ -58,7 +69,7 @@ class TestInitialize(unittest.TestCase):
     def _create_older_database(self) -> None:
         connection = sqlite3.connect(self.database_path)
         try:
-            connection.executescript(_schema_before_the_error_column())
+            connection.executescript(_schema_before_the_migrations())
         finally:
             connection.close()
 
@@ -71,14 +82,16 @@ class TestInitialize(unittest.TestCase):
         with mock.patch.object(db, 'MIGRATIONS',
                                db.MIGRATIONS + (A_MIGRATION_THAT_CANNOT_BE_REPLAYED,)):
             db.initialize(self.database_path)
-            self.assertEqual(self._stamped_migrations(), [0, 1])
+            self.assertEqual(self._stamped_migrations(), list(range(len(db.MIGRATIONS))))
 
     def test_an_older_database_with_an_empty_ledger_has_the_pending_migrations_applied(self) -> None:
         self._create_older_database()
         self.assertNotIn('error', self._columns('refresh_runs'))
+        self.assertNotIn('pr_title', self._columns('build_verdicts'))
         self.assertEqual(self._stamped_migrations(), [])
         db.initialize(self.database_path)
         self.assertIn('error', self._columns('refresh_runs'))
+        self.assertIn('pr_title', self._columns('build_verdicts'))
         self.assertEqual(self._stamped_migrations(), list(range(len(db.MIGRATIONS))))
 
     def test_an_older_database_keeps_the_rows_it_already_had(self) -> None:

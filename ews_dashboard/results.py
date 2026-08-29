@@ -1,10 +1,20 @@
 """Cache-aware reader for results.webkit.org's test history.
 
-The endpoint behind this is /api/results-summary/<suite>/<test>, which returns nine outcome
-percentages summing to 100 over roughly the last 99 runs ending at `ref`. It is a sliding window,
-not history-up-to-a-commit: asking for an older ref moves the window, it does not truncate it. So
-this module answers "how reliable is this test around here", and cannot answer "did this test
-start failing at commit X" — that needs the per-run endpoint.
+Two endpoints, for two different questions.
+
+/api/results-summary/<suite>/<test> returns nine outcome percentages summing to 100 over roughly
+the last 99 runs ending at `ref`. It is a sliding window, not history-up-to-a-commit: asking for an
+older ref moves the window, it does not truncate it. So it answers "how reliable is this test
+around here", and cannot answer "did this test start failing at commit X".
+
+/api/results/<suite>/<test> returns the individual runs, each against the commit it tested, which is
+what an escape check needs. Its bounds are the trap. `after_ref` and `before_ref` resolve a commit
+first and answer 404 when results.webkit.org has never heard of it, and a 404 from this service
+otherwise means "nothing recorded", so a landed commit that is not registered would read as a test
+that never ran. `after_timestamp` and `before_timestamp` need no registration, so the bounds here
+are commit timestamps. `branch` is the second trap: runs for main are partitioned under the literal
+key 'default' (resultsdbpy `CommitContext.DEFAULT_BRANCH_KEY`), so `branch=main` answers with an
+empty list rather than an error. Sending no branch at all is what selects main.
 
 Every response is cached, including the absence of one. A configuration with no recorded history
 answers 404, which is a real answer; re-asking it on every run is what made the prototype's
@@ -23,12 +33,21 @@ import urllib.parse
 import urllib.request
 from collections import Counter
 from concurrent import futures
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Iterable, Optional
 
 from ews_dashboard import config
 
 OUTCOMES = ('pass', 'fail', 'timeout', 'crash', 'image', 'audio', 'text', 'error', 'warning')
+
+# A stored run carries one outcome, the worst of the run, spelled as resultsdbpy's Expectations
+# names it. WARNING counts with PASS for the same reason `Answer.pass_rate` counts it there.
+PASSING_OUTCOMES = ('PASS', 'WARNING')
+
+# A run's uuid is its commit's timestamp times this, plus an ordinal separating commits that share a
+# timestamp (resultsdbpy `Commit.UUID_MULTIPLIER`). Nothing else in the response says which commit a
+# run tested, so this is how a run is placed before or after a landing.
+UUID_MULTIPLIER = 100
 
 HTTP_TIMEOUT_SECONDS = 30
 RETRY_ATTEMPTS = 3
@@ -36,6 +55,13 @@ RETRY_BACKOFF_SECONDS = 1.5
 
 CURRENT_TTL_SECONDS = 24 * 3600
 NO_HISTORY_TTL_SECONDS = 7 * 24 * 3600
+
+RUNS_TTL_SECONDS = 6 * 3600
+# Bots report late: a window that only just closed keeps filling for about this long, so a cached
+# answer for one is re-asked until the window is this far behind.
+RUNS_SETTLING_SECONDS = 2 * 24 * 3600
+# Per configuration, and the endpoint's own default. A window measured in days holds far fewer.
+RUNS_PER_QUERY = 100
 
 # The endpoint answers in about 1.6 seconds, so a few thousand lookups cost over an hour in series.
 PREFETCH_WORKERS = 16
@@ -83,6 +109,39 @@ class Query:
     configuration: Configuration
     # '' asks about the tip of the tree. Anything else is a WebKit identifier or SHA.
     commit_ref: str = ''
+
+
+@dataclass(frozen=True)
+class RunQuery:
+    """Every run of one test on main whose commit falls in a window of commit timestamps."""
+
+    test_name: str
+    configuration: Configuration
+    after: int
+    before: int
+
+
+@dataclass(frozen=True)
+class Run:
+    """One run of one test, against the commit whose timestamp is `commit_at`.
+
+    `expected` is what the platform's expectations allowed, so a test listed as a failure is
+    `failed` and not `unexpected`.
+    """
+
+    actual: str
+    expected: str
+    started_at: int
+    commit_at: int
+    version_name: str
+
+    @property
+    def failed(self) -> bool:
+        return self.actual not in PASSING_OUTCOMES
+
+    @property
+    def unexpected(self) -> bool:
+        return self.failed and self.actual not in self.expected.split()
 
 
 @dataclass(frozen=True)
@@ -149,8 +208,67 @@ def _expired(row: sqlite3.Row, query: Query) -> bool:
     return False
 
 
+def cached_runs(connection: sqlite3.Connection, query: RunQuery) -> Optional[list]:
+    """One test's runs over a window from the cache alone, or None when no refresh has stored them.
+
+    An empty list is an answer — the test did not run on main in that window — and is distinct from
+    the None this returns for a window nobody has asked about yet.
+    """
+    row = _runs_cache_row(connection, query)
+    if row is None or _runs_expired(row, query):
+        return None
+    return _runs_of(row)
+
+
+def _runs_of(row: sqlite3.Row) -> list:
+    return [Run(**stored) for stored in json.loads(row['runs'])]
+
+
+def _runs_cache_row(connection: sqlite3.Connection, query: RunQuery) -> Optional[sqlite3.Row]:
+    configuration = query.configuration
+    return connection.execute(
+        '''SELECT runs, fetched_at FROM test_runs_cache
+           WHERE test_name = ? AND suite = ? AND platform = ? AND style = ? AND flavor = ?
+             AND after_at = ? AND before_at = ?''',
+        (query.test_name, configuration.suite, configuration.platform, configuration.style,
+         configuration.flavor, query.after, query.before),
+    ).fetchone()
+
+
+def _runs_expired(row: sqlite3.Row, query: RunQuery) -> bool:
+    """Whether a window may still be filling. A window whose end is far enough in the past when it
+    was fetched holds every run it will ever hold, so that answer never expires."""
+    if row['fetched_at'] >= query.before + RUNS_SETTLING_SECONDS:
+        return False
+    return int(time.time()) - row['fetched_at'] > RUNS_TTL_SECONDS
+
+
 def _commit_refs_in(queries: 'list[Query]') -> 'list[str]':
     return sorted({query.commit_ref for query in queries if query.commit_ref})
+
+
+def _runs_in(answer: list) -> Iterable[Run]:
+    """The runs across every configuration the response groups them by.
+
+    A query names a platform, a style and a flavor, which still spans OS versions, models and
+    architectures, so a response holds several groups. They are pooled the way the results-summary
+    percentages pool them, and each run keeps the version it ran on so a reader can separate them.
+    """
+    for group in answer:
+        if not isinstance(group, dict):
+            continue
+        configuration = group.get('configuration') or {}
+        for run in group.get('results') or []:
+            uuid = int(run.get('uuid') or 0)
+            yield Run(
+                # A run with no outcome recorded is a pass, which is how the results-summary
+                # endpoint reads it too (`result.get('actual', 'PASS')` in test_controller.py).
+                actual=run.get('actual') or 'PASS',
+                expected=run.get('expected') or '',
+                started_at=int(run.get('start_time') or 0),
+                commit_at=uuid // UUID_MULTIPLIER,
+                version_name=configuration.get('version_name') or '',
+            )
 
 
 class History:
@@ -165,6 +283,54 @@ class History:
 
     def pass_rate(self, query: Query) -> Optional[float]:
         return Answer(self.outcomes(query)).pass_rate
+
+    def runs(self, query: RunQuery) -> list:
+        """Every run of one test on main whose commit falls in the window, oldest commit first.
+
+        Empty means the test did not run there, which upstream reports as a 404 for a test it has
+        never heard of and as an empty list for one it has: neither is distinguishable from the
+        other here, and neither is evidence of anything.
+        """
+        cached = cached_runs(self.connection, query)
+        if cached is not None:
+            self._record('runs_cache_hit')
+            return cached
+        self._record('runs_cache_miss')
+        fetched = self._fetch_runs(query)
+        self._write_runs_cache(query, fetched)
+        return fetched
+
+    def _fetch_runs(self, query: RunQuery) -> list:
+        parameters = dict(
+            query.configuration.query_parameters(),
+            after_timestamp=query.after,
+            before_timestamp=query.before,
+            limit=RUNS_PER_QUERY,
+        )
+        path = (
+            f'/api/results/{query.configuration.suite}/'
+            f"{urllib.parse.quote(query.test_name, safe='/')}"
+            f'?{urllib.parse.urlencode(parameters)}'
+        )
+        answer = self._get(path)
+        if not isinstance(answer, list):
+            return []
+        return sorted(_runs_in(answer), key=lambda run: (run.commit_at, run.started_at))
+
+    def _write_runs_cache(self, query: RunQuery, runs: list) -> None:
+        configuration = query.configuration
+        with self.connection:
+            self.connection.execute(
+                '''INSERT OR REPLACE INTO test_runs_cache (
+                    test_name, suite, platform, style, flavor, after_at, before_at,
+                    runs, fetched_at
+                ) VALUES (?,?,?,?,?,?,?, ?,?)''',
+                (
+                    query.test_name, configuration.suite, configuration.platform,
+                    configuration.style, configuration.flavor, query.after, query.before,
+                    json.dumps([asdict(run) for run in runs]), int(time.time()),
+                ),
+            )
 
     def outcomes(self, query: Query) -> Optional[dict]:
         resolved = self._resolved(query)

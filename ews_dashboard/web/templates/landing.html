@@ -2,7 +2,7 @@
 {% from 'parts.html' import window_chooser, suite_chooser, queue_pane, rolling_chooser, staleness, rate %}
 
 {% block content %}
-{{ staleness(freshness) }}
+{{ staleness(freshness, freshness_dismissed) }}
 
 <div class="row headline">
   <div class="col-8">
@@ -16,10 +16,6 @@
   <div class="col-12">{{ suite_chooser('landing', window, suite_choices, suite, builder=builder, rolling=rolling) }}</div>
 </div>
 
-<div class="scope">
-{{ queue_pane('landing', window, queue_activity, suite, builder, rolling=rolling) }}
-
-<div class="scoped">
 <div class="row metrics">
   <div class="col-3 metric">
     <div class="text tiny label">Builds that blamed an author for noise</div>
@@ -40,7 +36,11 @@
   </div>
 </div>
 
-<div class="section">
+<div class="scope">
+{{ queue_pane('landing', window, queue_activity, suite, builder, rolling=rolling) }}
+
+<div class="scoped">
+<div class="section chart">
   <div class="header">
     <div class="title">Blame noise over {{ window.days }} days</div>
     {{ rolling_chooser('landing', window, rolling_choices, rolling, suite=suite, builder=builder) }}
@@ -93,16 +93,12 @@
         {% endfor %}
       </tbody>
     </table>
+    <div class="caveats text tiny">
+      <p>A failure is counted as noise when the same test passes {{ threshold_pct }}% of the time or less on main at the commit the change was rebased onto. Main does not contain the change, so a test that is reliable on main and was genuinely broken by the change cannot be told apart from one that flaked once during this build: every rate here is a floor on blame noise, not a verdict on any single build.</p>
+      <p>{{ counts.unclassified | count }} failing builds in this window have not been classified yet, and {{ counts.no_surfaced | count }} showed the author no new failures at all, so neither group is in the denominators above. {{ counts.surfaced_undetermined | count }} author-visible failures had no recorded history to compare against, and {{ query_failures | count }} of EWS's own flakiness queries returned no answer.</p>
+    </div>
   </div>
 </div>
 </div>
-</div>
-
-<div class="section caveats">
-  <div class="header"><div class="title">How to read this</div></div>
-  <div class="content text tiny">
-    <p>A failure is counted as noise when the same test passes {{ threshold_pct }}% of the time or less on main at the commit the change was rebased onto. Main does not contain the change, so a test that is reliable on main and was genuinely broken by the change cannot be told apart from one that flaked once during this build: every rate here is a floor on blame noise, not a verdict on any single build.</p>
-    <p>{{ counts.unclassified | count }} failing builds in this window have not been classified yet, and {{ counts.no_surfaced | count }} showed the author no new failures at all, so neither group is in the denominators above. {{ counts.surfaced_undetermined | count }} author-visible failures had no recorded history to compare against, and {{ query_failures | count }} of EWS's own flakiness queries returned no answer.</p>
-  </div>
 </div>
 {% endblock %}

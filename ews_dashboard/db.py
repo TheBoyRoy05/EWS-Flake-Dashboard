@@ -24,6 +24,7 @@ BUSY_TIMEOUT_MILLISECONDS = 30000
 # so every change belongs in both places.
 MIGRATIONS: tuple[str, ...] = (
     'ALTER TABLE refresh_runs ADD COLUMN error TEXT',
+    'ALTER TABLE build_verdicts ADD COLUMN pr_title TEXT',
 )
 
 REPORTED_TABLES = (
@@ -31,8 +32,11 @@ REPORTED_TABLES = (
     'flakiness_verdicts',
     'builds_ingested',
     'builder_coverage',
+    'landings',
     'results_summary_cache',
+    'test_runs_cache',
     'build_classifications',
+    'escape_verdicts',
     'refresh_runs',
 )
 

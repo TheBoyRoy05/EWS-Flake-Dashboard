@@ -160,6 +160,35 @@ class StubHistory:
         return self.pass_rates.get(query.test_name)
 
 
+class StubRunHistory:
+    """Runs on main by test name, for the escape check.
+
+    A window is answered by filtering the timeline a test hands over, inclusive at both ends, since
+    the endpoint's own inclusivity is not documented: code that relies on it rather than on the
+    commit each run tested fails here.
+    """
+
+    def __init__(self, runs_by_test: dict, unavailable: Optional[set] = None) -> None:
+        self.runs_by_test = runs_by_test
+        self.unavailable = unavailable or set()
+        self.queries: list = []
+
+    def runs(self, query: results.RunQuery) -> list:
+        self.queries.append(query)
+        if query.test_name in self.unavailable:
+            raise results.HistoryUnavailable(query.test_name)
+        return [run for run in self.runs_by_test.get(query.test_name, [])
+                if query.after <= run.commit_at <= query.before]
+
+
+def run(actual: str = 'PASS', commit_at: int = DEFAULT_BUILD_TIME, expected: str = 'PASS',
+        version_name: str = 'Sequoia') -> results.Run:
+    """One run of one test on main. A run reports later than the commit it tested, so `started_at`
+    is deliberately not `commit_at`."""
+    return results.Run(actual=actual, expected=expected, started_at=commit_at + 1800,
+                       commit_at=commit_at, version_name=version_name)
+
+
 class DatabaseTest(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.mkdtemp(prefix='ews-dashboard-test-')
@@ -186,6 +215,9 @@ class DatabaseTest(unittest.TestCase):
         results_code: int = 2,
         exceeded_failure_limit: bool = False,
         identifier: Optional[str] = IDENTIFIER,
+        pr_id: Optional[int] = None,
+        pr_title: Optional[str] = None,
+        sha: Optional[str] = None,
     ) -> int:
         """Store one build the way ingest would, and return its build id.
 
@@ -208,6 +240,12 @@ class DatabaseTest(unittest.TestCase):
             lists['results-db_second_run_flaky_unknown'] = query_failed
         extra = failure_list_properties(lists)
         extra.update(properties({'identifier': identifier}))
+        if pr_id is not None:
+            extra.update(properties({'github.number': pr_id}))
+        if pr_title is not None:
+            extra.update(properties({'github.title': pr_title}))
+        if sha is not None:
+            extra.update(properties({'github.head.sha': sha}))
         if exceeded_failure_limit:
             extra.update(properties({'first_results_exceed_failure_limit': True}))
 
@@ -240,6 +278,25 @@ class DatabaseTest(unittest.TestCase):
                     *[(outcomes or {}).get(outcome) for outcome in results.OUTCOMES],
                     int(time.time()) - age_seconds,
                 ),
+            )
+
+    def store_landing(self, pr_id: int, status: str = 'landed',
+                      landed_at: int = DEFAULT_BUILD_TIME + 86400,
+                      commit_hash: str = 'f' * 40, matches: int = 1) -> None:
+        """Write the row `landings.resolve` would have left, so the escape check can be tested
+        without a checkout to read commit messages from."""
+        with self.connection:
+            self.connection.execute(
+                '''INSERT OR REPLACE INTO landings (
+                    pr_id, status, matches, commit_hash, identifier, landed_at, subject,
+                    branch_head, resolved_at
+                ) VALUES (?,?,?,?,?,?,?,?,?)''',
+                (pr_id, status, matches,
+                 commit_hash if status == 'landed' else None,
+                 '314600@main' if status == 'landed' else None,
+                 landed_at if status == 'landed' else None,
+                 'A change that landed' if status == 'landed' else None,
+                 'e' * 40, int(time.time())),
             )
 
     def stored_build(self, build_id: int) -> sqlite3.Row:

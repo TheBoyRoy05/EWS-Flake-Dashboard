@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS build_verdicts (
     build_number                INTEGER NOT NULL,
 
     pr_id                       INTEGER,
+    -- The pull request's title, which is the only thing a build and the commit it landed as have in
+    -- common: a landed message names its bug and its radar, never its pull request.
+    pr_title                    TEXT,
     sha                         TEXT,
     change_id                   TEXT,
     -- WebKit commit identifier of the main commit the pull request was rebased onto, e.g.
@@ -118,6 +121,28 @@ CREATE TABLE IF NOT EXISTS builder_coverage (
 );
 
 
+-- Which commit on main each pull request landed as, worked out by webkit_checkout from the pull
+-- request's title. Cached because the search reads commit messages, and because most of these rows
+-- are asked for again on the next refresh.
+CREATE TABLE IF NOT EXISTS landings (
+    pr_id         INTEGER PRIMARY KEY,
+    status        TEXT    NOT NULL CHECK (status IN ('landed', 'not_landed', 'ambiguous')),
+    -- How many commits on main the title matched: 1 for landed, more for ambiguous, 0 for neither.
+    matches       INTEGER NOT NULL DEFAULT 0,
+    commit_hash   TEXT,
+    -- WebKit identifier of the landed commit, from its Canonical link.
+    identifier    TEXT,
+    landed_at     INTEGER,
+    subject       TEXT,
+    -- The main this answer was looked for in. A pull request that had not landed when it was first
+    -- asked about is the ordinary case, not a dead end, so 'not_landed' is re-asked once main moves.
+    branch_head   TEXT    NOT NULL,
+    resolved_at   INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS index_landings_status ON landings(status);
+
+
 -- Cached responses from results.webkit.org's results-summary endpoint, which returns nine
 -- outcome percentages summing to 100.
 --
@@ -151,6 +176,66 @@ CREATE TABLE IF NOT EXISTS results_summary_cache (
 
     PRIMARY KEY (test_name, suite, platform, style, flavor, commit_ref)
 );
+
+
+-- Cached responses from results.webkit.org's per-run endpoint: every run of one test on main whose
+-- commit timestamp falls in a window. Stored as the JSON list the reader parses out of the
+-- response, because a page never groups or counts by anything inside a single run.
+--
+-- An empty list is an answer — the test did not run on main in that window — and is what a test
+-- upstream has never heard of leaves behind as well.
+--
+-- Invalidation: a window whose end was already RUNS_SETTLING_SECONDS in the past when it was
+-- fetched holds every run it will ever hold and never expires. A window nearer than that keeps
+-- filling as bots report, so it expires after RUNS_TTL_SECONDS.
+CREATE TABLE IF NOT EXISTS test_runs_cache (
+    test_name     TEXT NOT NULL,
+    suite         TEXT NOT NULL,
+    platform      TEXT NOT NULL,
+    style         TEXT NOT NULL,
+    flavor        TEXT NOT NULL DEFAULT '',
+
+    -- Commit timestamps, not run times: the endpoint's bounds are the commit a run tested.
+    after_at      INTEGER NOT NULL,
+    before_at     INTEGER NOT NULL,
+
+    runs          TEXT NOT NULL,
+    fetched_at    INTEGER NOT NULL,
+
+    PRIMARY KEY (test_name, suite, platform, style, flavor, after_at, before_at)
+);
+
+
+-- One row per convicted test whose pull request has a landed commit: what main did with that test
+-- either side of the landing, and what that says about the conviction.
+--
+-- Only tests that could be asked about are here. A conviction whose pull request has not landed, or
+-- whose title matched several commits, is left out and recounted from `landings` on every pass,
+-- since a pull request that had not landed yet is the ordinary case rather than an answer.
+--
+-- Invalidation: `window_ends_at` is when the watched window closes, so a row decided before that
+-- window had settled is decided again. One decided after it holds.
+CREATE TABLE IF NOT EXISTS escape_verdicts (
+    build_id        INTEGER NOT NULL REFERENCES build_verdicts(build_id) ON DELETE CASCADE,
+    test_name       TEXT    NOT NULL,
+
+    verdict         TEXT    NOT NULL CHECK (verdict IN (
+                        'ESCAPED', 'FLAKY_ON_MAIN', 'CONTAINED', 'ALREADY_FAILING',
+                        'NO_RUNS', 'NO_BASELINE', 'TREE_DIVERGED'
+                    )),
+
+    runs_before     INTEGER NOT NULL DEFAULT 0,
+    failed_before   INTEGER NOT NULL DEFAULT 0,
+    runs_after      INTEGER NOT NULL DEFAULT 0,
+    failed_after    INTEGER NOT NULL DEFAULT 0,
+
+    window_ends_at  INTEGER NOT NULL,
+    decided_at      INTEGER NOT NULL,
+
+    PRIMARY KEY (build_id, test_name)
+);
+
+CREATE INDEX IF NOT EXISTS index_escapes_verdict ON escape_verdicts(verdict);
 
 
 -- Cached per-build false-positive classification, keyed by the threshold it was computed under.
