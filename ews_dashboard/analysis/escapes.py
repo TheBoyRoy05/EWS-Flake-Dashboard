@@ -53,16 +53,16 @@ UNDECIDED_VERDICTS = (NO_RUNS, NO_BASELINE, TREE_DIVERGED)
 
 VERDICT_DESCRIPTIONS = {
     ESCAPED: 'After the landing main started failing this and kept failing it, so the conviction '
-             'excused a real regression',
+             'excused a real regression.',
     FAILS_ON_MAIN: 'Main fails this without the change, either flaking after the landing or '
-                   'already failing it before, so the build was told the truth',
-    CONTAINED: 'After the landing main did not fail this',
-    NO_RUNS: 'No bot ran this on main in the window after the change landed',
+                   'already failing it before, so the build was told the truth.',
+    CONTAINED: 'After the landing main did not fail this.',
+    NO_RUNS: 'No bot ran this on main in the window after the change landed.',
     NO_BASELINE: 'It failed on main after the change landed, but nothing ran it before, so a '
-                 'regression cannot be told from a failure main already had',
+                 'regression cannot be told from a failure main already had.',
     TREE_DIVERGED: 'This conviction was made on a version of the pull request that a later build '
                    'superseded, so the code that landed is not the code it was made on and main '
-                   'cannot grade it',
+                   'cannot grade it.',
 }
 
 # The pull requests a conviction cannot even be looked for on, counted from `landings` rather than
@@ -91,34 +91,6 @@ def _filters(suite: Optional[str], builder: Optional[str]) -> tuple:
         conditions += ' AND build.builder = :builder'
         parameters['builder'] = builder
     return conditions, parameters
-
-
-@dataclass(frozen=True)
-class Escape:
-    """One conviction main disagreed with, and the evidence that says so."""
-
-    test_name: str
-    rule: str
-    build_id: int
-    builder: str
-    builder_id: int
-    build_number: int
-    pr_id: Optional[int]
-    configuration: results.Configuration
-    runs_before: int
-    runs_after: int
-    failed_after: int
-    window_ends_at: int
-
-    @property
-    def landed_at(self) -> int:
-        return self.window_ends_at - ESCAPE_WINDOW_SECONDS
-
-    @property
-    def failure_pct(self) -> Optional[float]:
-        if not self.runs_after:
-            return None
-        return round(100.0 * self.failed_after / self.runs_after, 1)
 
 
 @dataclass(frozen=True)
@@ -159,6 +131,12 @@ class Tally:
 
     by_verdict: dict
     unaskable: dict
+
+    @property
+    def asked(self) -> int:
+        """Every conviction main was asked about, answered or not, which is what the buckets divide
+        up."""
+        return sum(self.by_verdict.values())
 
     @property
     def decided(self) -> int:
@@ -419,42 +397,6 @@ def tally(connection: sqlite3.Connection, since: int, until: int, suite: Optiona
         by_verdict=by_verdict(connection, since, until, suite=suite, builder=builder),
         unaskable=unaskable(connection, since, until, suite=suite, builder=builder),
     )
-
-
-def escaped(connection: sqlite3.Connection, since: int, until: int, suite: Optional[str] = None,
-            builder: Optional[str] = None, limit: int = ESCAPES_LISTED) -> 'list[Escape]':
-    """The convictions main disagreed with, worst first: the whole point of the page."""
-    conditions, parameters = _filters(suite, builder)
-    parameters.update({'since': since, 'until': until, 'escaped': ESCAPED, 'limit': limit})
-    return [
-        Escape(
-            test_name=row['test_name'],
-            rule=row['rule'],
-            build_id=row['build_id'],
-            builder=row['builder'],
-            builder_id=row['builder_id'],
-            build_number=row['build_number'],
-            pr_id=row['pr_id'],
-            configuration=results.Configuration.of_build(row),
-            runs_before=row['runs_before'],
-            runs_after=row['runs_after'],
-            failed_after=row['failed_after'],
-            window_ends_at=row['window_ends_at'],
-        )
-        for row in connection.execute(
-            f'''SELECT outcome.*, verdict.rule, build.builder, build.builder_id,
-                       build.build_number, build.pr_id, build.suite, build.platform,
-                       build.style, build.flavor
-                FROM escape_verdicts AS outcome
-                JOIN build_verdicts AS build USING (build_id)
-                JOIN latest_flakiness_verdicts AS verdict
-                  ON verdict.build_id = outcome.build_id AND verdict.test_name = outcome.test_name
-                WHERE outcome.verdict = :escaped AND {WINDOW}{conditions}
-                ORDER BY outcome.failed_after DESC, outcome.window_ends_at DESC
-                LIMIT :limit''',
-            parameters,
-        )
-    ]
 
 
 def convictions(connection: sqlite3.Connection, since: int, until: int, verdict: str,

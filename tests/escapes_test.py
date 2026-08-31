@@ -128,6 +128,16 @@ class TestTally(fixtures.DatabaseTest):
         self.assertEqual((tally.decided, tally.undecided), (44, 2))
         self.assertEqual(tally.escape_rate_pct, 0.0)
 
+    def test_what_was_asked_counts_the_convictions_no_answer_came_back_about(self) -> None:
+        """The buckets divide up every conviction main was asked about, so their total has to hold
+        the undecided ones the rate leaves out."""
+        tally = escapes.Tally(
+            by_verdict={escapes.ESCAPED: 0, escapes.FAILS_ON_MAIN: 5, escapes.CONTAINED: 39,
+                        escapes.NO_RUNS: 2},
+            unaskable={escapes.NOT_LANDED: 7},
+        )
+        self.assertEqual(tally.asked, 46)
+
 
 class TestAssessOne(fixtures.DatabaseTest):
     def test_the_landing_commit_belongs_to_the_window_after_it_and_not_to_the_baseline(self) -> None:

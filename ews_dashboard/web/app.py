@@ -382,10 +382,9 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
     page shows what the refresh has already decided and says how much it could not.
     """
     scope = _scope(open_connection, window)
-    requested = _chosen('verdict', escapes.VERDICTS)
-    verdict_shown = requested if requested != escapes.ESCAPED else None
+    verdict_shown = _chosen('verdict', escapes.VERDICTS, escapes.ESCAPED)
     drilled = escapes.convictions(open_connection, window.since, window.until, verdict_shown,
-                                  suite=scope.suite, builder=scope.builder) if verdict_shown else []
+                                  suite=scope.suite, builder=scope.builder)
     return dict(
         window=window,
         window_choices=WINDOW_CHOICES,
@@ -395,8 +394,7 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
         queue_activity=scope.queue_activity,
         tally=escapes.tally(open_connection, window.since, window.until,
                             suite=scope.suite, builder=scope.builder),
-        escaped=escapes.escaped(open_connection, window.since, window.until,
-                                suite=scope.suite, builder=scope.builder),
+        escaped_verdict=escapes.ESCAPED,
         convictions=drilled,
         verdict_shown=verdict_shown,
         sentence=escapes.sentence,

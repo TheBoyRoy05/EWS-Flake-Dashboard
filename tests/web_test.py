@@ -555,10 +555,18 @@ class TestEscapes(WebTest):
                  int(time.time()), int(time.time())),
             )
 
+    def selected_category(self, page: str) -> str:
+        """The verdict the categories pane shows as chosen, read from the pill inside its entry. The
+        pill is what tells a category entry from the queue rail's, which is selected too."""
+        found = re.search(r'<a class="entry selected"[^>]*>\s*<span class="line">\s*'
+                          r'<span class="label"><span class="state state-(\w+)">', page)
+        self.assertIsNotNone(found, 'no category entry is selected')
+        return found.group(1)
+
     def test_a_window_with_nothing_decided_says_so_rather_than_reading_as_no_escapes(self) -> None:
         self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1, pr_title='One')
         page = self.page('/escapes')
-        self.assertIn('No escapes decided in this window', page)
+        self.assertIn('No conviction in this window escaped', page)
         self.assertIn('1 not looked for', page)
 
     def test_an_escape_is_listed_with_the_runs_behind_it(self) -> None:
@@ -602,7 +610,7 @@ class TestEscapes(WebTest):
                          builder_id=9, pr_id=2, pr_title='Two')
         page = self.page(f'/escapes?builder={fixtures.GTK_BUILDER}')
         self.assertNotIn('fast/a.html', page)
-        self.assertIn('No escapes decided in this window', page)
+        self.assertIn('No conviction in this window escaped', page)
 
     def test_a_verdict_drilled_into_lists_its_convictions_and_why(self) -> None:
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=72555,
@@ -619,6 +627,7 @@ class TestEscapes(WebTest):
         self._stored_escape(build_id, 'fast/a.html', escapes.CONTAINED, failed_after=0)
         page = self.page('/escapes?verdict=NONSENSE')
         self.assertNotIn('never failed it', page)
+        self.assertEqual(self.selected_category(page), escapes.ESCAPED)
 
     def test_the_verdict_being_drilled_into_survives_a_change_of_queue_or_window(self) -> None:
         """The drill-down is a query parameter, so a link that dropped it would close the card the
@@ -630,14 +639,87 @@ class TestEscapes(WebTest):
         self.assertRegex(page, rf'class="badge active" href="[^"]*verdict={escapes.CONTAINED}')
         self.assertRegex(page, rf'class="entry[^"]*" href="[^"]*verdict={escapes.CONTAINED}')
 
-    def test_the_escaped_count_links_to_the_card_that_already_lists_them(self) -> None:
+    def test_the_page_shows_the_escapes_it_exists_for_when_nothing_is_chosen(self) -> None:
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
         page = self.page('/escapes')
-        self.assertIn('<a href="#ESCAPED">', page)
-        self.assertIn('<div class="section" id="ESCAPED">', page)
-        self.assertNotIn(f'verdict={escapes.ESCAPED}', page)
+        self.assertEqual(self.selected_category(page), escapes.ESCAPED)
+        self.assertIn('fast/a.html', page)
+
+    def test_a_chosen_category_is_the_selected_one_and_the_default_is_not(self) -> None:
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.NO_RUNS, failed_after=0, runs_after=0)
+        self.assertEqual(self.selected_category(self.page(f'/escapes?verdict={escapes.NO_RUNS}')),
+                         escapes.NO_RUNS)
+
+    def test_every_verdict_is_a_category_even_the_ones_nothing_reached(self) -> None:
+        """A bucket nothing landed in has to read as a zero rather than vanish, or a reader cannot
+        tell an empty bucket from one this page never checks."""
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.CONTAINED, failed_after=0)
+        page = self.page('/escapes')
+        for verdict in escapes.VERDICTS:
+            expected = 1 if verdict == escapes.CONTAINED else 0
+            self.assertRegex(page, rf'state-{verdict}">{verdict}</span></span>\s*'
+                                   rf'<span class="tally">{expected}</span>')
+            self.assertIn(f'verdict={verdict}', page)
+
+    def test_a_category_previews_its_meaning_and_the_chosen_one_reads_it_out(self) -> None:
+        """Six descriptions under six pills made the pane taller than the escapes beside it, so an
+        unselected category previews its meaning on hover and the selected one says it in the detail
+        pane, where there is room for a line of prose."""
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.CONTAINED, failed_after=0)
+        page = self.page(f'/escapes?verdict={escapes.CONTAINED}')
+        meaning = escapes.VERDICT_DESCRIPTIONS[escapes.CONTAINED]
+        self.assertIn(f'title="{meaning}"', page)
+        self.assertIn(f'<p class="meaning text tiny">{meaning}</p>', page)
+
+    def test_the_meaning_gives_way_to_the_placeholder_when_there_is_nothing_to_list(self) -> None:
+        """Two paragraphs saying overlapping things read as a pane arguing with itself, and the
+        placeholder is the one that explains an empty pane."""
+        page = self.page('/escapes')
+        self.assertIn('No conviction in this window escaped', page)
+        self.assertNotIn('<p class="meaning text tiny">', page)
+
+    def test_the_categories_pane_tallies_the_convictions_it_divides_up(self) -> None:
+        first = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                 pr_title='One')
+        second = self.store_build(2, flaky={'fast/b.html': config.CLEAN_TREE}, pr_id=2,
+                                  pr_title='Two')
+        self._stored_escape(first, 'fast/a.html', escapes.CONTAINED, failed_after=0)
+        self._stored_escape(second, 'fast/b.html', escapes.NO_RUNS, failed_after=0, runs_after=0)
+        page = self.page('/escapes')
+        self.assertRegex(page, r'What main said</span>\s*'
+                               r'<span class="tally">2 convictions</span>')
+
+    def test_the_verdict_travels_with_the_queue_rail_so_a_queue_holds_the_category(self) -> None:
+        self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1, pr_title='One')
+        page = self.page(f'/escapes?verdict={escapes.CONTAINED}')
+        found = re.search(rf'<a class="entry[^"]*" href="([^"]*builder={fixtures.LAYOUT_BUILDER}'
+                          r'[^"]*)"', page)
+        self.assertIsNotNone(found, 'the queue rail rendered no entry for the layout queue')
+        link = found.group(1).replace('&amp;', '&')
+        self.assertIn(f'verdict={escapes.CONTAINED}', link)
+        self.assertEqual(self.selected_category(self.page(link)), escapes.CONTAINED)
+
+    def test_the_detail_pane_narrows_to_the_chosen_queue(self) -> None:
+        """The counts beside it are narrowed, so a list that was not would name a test the queue
+        rail says is not there."""
+        first = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                 pr_title='One')
+        second = self.store_build(2, flaky={'fast/b.html': config.CLEAN_TREE},
+                                  builder=fixtures.GTK_BUILDER, builder_id=9, pr_id=2,
+                                  pr_title='Two')
+        self._stored_escape(first, 'fast/a.html', escapes.CONTAINED, failed_after=0)
+        self._stored_escape(second, 'fast/b.html', escapes.CONTAINED, failed_after=0)
+        page = self.page(f'/escapes?verdict={escapes.CONTAINED}&builder={fixtures.GTK_BUILDER}')
+        self.assertIn('fast/b.html', page)
+        self.assertNotIn('fast/a.html', page)
 
 
 class TestMethodologyDisclosure(WebTest):

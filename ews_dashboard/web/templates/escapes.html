@@ -36,59 +36,61 @@
   </div>
 </div>
 
-<div class="scope banded">
-{{ queue_pane('escaped_regressions', window, queue_activity, suite, builder, filter_args={'verdict': verdict_shown}) }}
+<div class="panes">
+  {{ queue_pane('escaped_regressions', window, queue_activity, suite, builder, filter_args={'verdict': verdict_shown}) }}
 
-<div class="scoped">
-<div class="section" id="ESCAPED">
-  <div class="header">
-    <div class="title">Tests main started failing after the change landed</div>
-    <div class="text tiny">{{ escaped | length | count }} shown</div>
+  <div class="pane categories">
+    <div class="head">
+      <span class="name">What main said</span>
+      <span class="tally">{{ tally.asked | count }} convictions</span>
+    </div>
+    <div class="body">
+      {% for verdict in verdicts %}
+      <a class="entry{{ ' selected' if verdict == verdict_shown }}" title="{{ verdict_descriptions[verdict] }}" href="{{ url_for('escaped_regressions', days=window.days, suite=suite, builder=builder, verdict=verdict) }}">
+        <span class="line">
+          <span class="label"><span class="state {{ verdict | state_class }}">{{ verdict }}</span></span>
+          <span class="tally">{{ tally.by_verdict[verdict] | count }}</span>
+        </span>
+      </a>
+      {% endfor %}
+    </div>
   </div>
-  <div class="content">
-    {% if not escaped %}
-    <div class="placeholder">No escapes decided in this window. A conviction can only be checked once its pull request has landed and bots have run the test on main.</div>
-    {% else %}
-    <table class="table full-width">
-      <thead><tr><th>Test</th><th>Rule</th><th>Queue</th><th class="numeric">Failed after</th><th class="when">Landed</th><th>Links</th></tr></thead>
-      <tbody>
-        {% for escape in escaped %}
-        <tr>
-          <td><a href="{{ links.test_history(escape.configuration, escape.test_name) }}">{{ escape.test_name }}</a></td>
-          <td class="text tiny">{{ escape.rule }}</td>
-          <td class="text tiny">{{ escape.builder }}</td>
-          <td class="numeric">{{ escape.failed_after | count }} of {{ escape.runs_after | count }}</td>
-          <td class="when text tiny">{{ escape.landed_at | moment }}</td>
-          <td class="text tiny">
-            <a href="{{ links.build(escape.builder_id, escape.build_number) }}">build</a>
-            {% if escape.pr_id %}<a href="{{ links.pull_request(escape.pr_id) }}">PR {{ escape.pr_id }}</a>{% endif %}
-            <a href="{{ links.test_investigation(escape.configuration, escape.test_name) }}">history</a>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    {% endif %}
-  </div>
-</div>
-</div>
-</div>
 
-<div class="section">
-  <div class="header"><div class="title">Every conviction main was asked about</div></div>
-  <div class="content">
-    <table class="table full-width">
-      <thead><tr><th>Answer</th><th>Convictions</th><th>Meaning</th></tr></thead>
-      <tbody>
-        {% for verdict in verdicts %}
-        <tr>
-          <td><span class="state {{ verdict | state_class }}">{{ verdict }}</span></td>
-          <td>{% if verdict == 'ESCAPED' %}<a href="#ESCAPED">{{ tally.by_verdict[verdict] | count }}</a>{% else %}<a href="{{ url_for('escaped_regressions', days=window.days, suite=suite, builder=builder, verdict=verdict) }}">{{ tally.by_verdict[verdict] | count }}</a>{% endif %}</td>
-          <td class="text tiny">{{ verdict_descriptions[verdict] }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+  <div class="pane detail">
+    <div class="head">
+      <span class="name">Convictions main answered <span class="state {{ verdict_shown | state_class }}">{{ verdict_shown }}</span></span>
+      <span class="tally">{{ convictions | length | count }} shown</span>
+    </div>
+    {% if convictions %}<p class="meaning text tiny">{{ verdict_descriptions[verdict_shown] }}</p>{% endif %}
+    <div class="body">
+      {% if not convictions %}
+      {% if verdict_shown == escaped_verdict %}
+      <div class="placeholder">No conviction in this window escaped: main never started failing a test a conviction had excused. The categories beside this are what main said instead, and a conviction can only be checked once its pull request has landed and bots have run the test on main.</div>
+      {% else %}
+      <div class="placeholder">No conviction in this window was answered this way. Pick another category to see what main said.</div>
+      {% endif %}
+      {% else %}
+      <table class="table full-width convictions">
+        <thead><tr><th>Test</th><th>Rule</th><th>Queue</th><th>Why</th><th class="when">Landed</th><th>Links</th></tr></thead>
+        <tbody>
+          {% for conviction in convictions %}
+          <tr>
+            <td><a href="{{ links.test_history(conviction.configuration, conviction.test_name) }}">{{ conviction.test_name }}</a></td>
+            <td class="text tiny">{{ conviction.rule }}</td>
+            <td class="text tiny">{{ conviction.builder }}</td>
+            <td class="text tiny">{{ sentence(conviction) }}</td>
+            <td class="when text tiny">{{ conviction.landed_at | moment }}</td>
+            <td class="text tiny">
+              <a href="{{ links.build(conviction.builder_id, conviction.build_number) }}">build</a>
+              {% if conviction.pr_id %}<a href="{{ links.pull_request(conviction.pr_id) }}">PR {{ conviction.pr_id }}</a>{% endif %}
+              <a href="{{ links.test_investigation(conviction.configuration, conviction.test_name) }}">history</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
   </div>
 </div>
 
@@ -103,34 +105,4 @@
     </details>
   </div>
 </div>
-
-{% if convictions %}
-<div class="section">
-  <div class="header">
-    <div class="title">Convictions main answered <span class="state {{ verdict_shown | state_class }}">{{ verdict_shown }}</span></div>
-    <div class="text tiny">{{ convictions | length | count }} shown</div>
-  </div>
-  <div class="content">
-    <table class="table full-width">
-      <thead><tr><th>Test</th><th>Rule</th><th>Queue</th><th>Why</th><th class="when">Landed</th><th>Links</th></tr></thead>
-      <tbody>
-        {% for conviction in convictions %}
-        <tr>
-          <td><a href="{{ links.test_history(conviction.configuration, conviction.test_name) }}">{{ conviction.test_name }}</a></td>
-          <td class="text tiny">{{ conviction.rule }}</td>
-          <td class="text tiny">{{ conviction.builder }}</td>
-          <td class="text tiny">{{ sentence(conviction) }}</td>
-          <td class="when text tiny">{{ conviction.landed_at | moment }}</td>
-          <td class="text tiny">
-            <a href="{{ links.build(conviction.builder_id, conviction.build_number) }}">build</a>
-            {% if conviction.pr_id %}<a href="{{ links.pull_request(conviction.pr_id) }}">PR {{ conviction.pr_id }}</a>{% endif %}
-            <a href="{{ links.test_investigation(conviction.configuration, conviction.test_name) }}">history</a>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</div>
-{% endif %}
 {% endblock %}

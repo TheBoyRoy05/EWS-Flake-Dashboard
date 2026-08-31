@@ -379,6 +379,7 @@ code {
 
 .pane.queues { flex: 0 0 260px; }
 .pane.builds { flex: 0 0 300px; }
+.pane.categories { flex: 0 0 300px; }
 .pane.detail { flex: 1 1 auto; }
 .pane > .head {
     display: flex;
@@ -820,4 +821,41 @@ code {
 .builds-filter input[type=number]:focus {
     outline: none;
     border-color: var(--accent);
+}
+
+/* The convictions table is told its column widths, because auto layout gives a column the width of
+   its longest unbroken token: a hyphenated queue name took seven lines and the explanation beside
+   it was squeezed into a six-word ribbon. Scoped here, since .table.full-width is shared. */
+.table.convictions {
+    table-layout: fixed;
+}
+
+.table.convictions td {
+    overflow-wrap: anywhere;
+}
+
+.table.convictions .when {
+    white-space: normal;
+}
+
+.table.convictions th:nth-child(1), .table.convictions td:nth-child(1) { width: 22%; }
+.table.convictions th:nth-child(2), .table.convictions td:nth-child(2) { width: 12%; }
+.table.convictions th:nth-child(3), .table.convictions td:nth-child(3) { width: 15%; }
+.table.convictions th:nth-child(4), .table.convictions td:nth-child(4) { width: 29%; }
+.table.convictions th:nth-child(5), .table.convictions td:nth-child(5) { width: 12%; }
+.table.convictions th:nth-child(6), .table.convictions td:nth-child(6) { width: 10%; }
+
+/* A rule name is one identifier, so it wraps as a broken word rather than as two: the column is
+   told to keep it whole and given the width its longest name needs. */
+.table.convictions td:nth-child(2) {
+    white-space: nowrap;
+    overflow-wrap: normal;
+}
+
+/* The selected verdict's meaning, between the detail pane's head and the list it explains. Padded
+   like .note rather than reusing it, since .note carries the warning colours. */
+.pane > .meaning {
+    margin: 0;
+    padding: 9px var(--pad);
+    border-bottom: 1px solid var(--border-soft);
 }
