@@ -72,6 +72,12 @@ DEPLOYMENTS = (
         label='read',
         detail='First build carrying a results-db flakiness property, so the read path is live.',
     ),
+    Deployment(
+        at=datetime.datetime(2026, 8, 31, 10, 52, 37, tzinfo=datetime.timezone.utc),
+        label='act',
+        detail='First build to ignore a flaky failure rather than log that it would have, so '
+               'suppression is live. The master picked the change up 58 hours after it landed.',
+    ),
 )
 
 

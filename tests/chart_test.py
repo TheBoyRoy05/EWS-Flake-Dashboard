@@ -36,7 +36,7 @@ class TestChart(unittest.TestCase):
     def test_an_empty_series_draws_nothing_but_still_has_a_scale(self) -> None:
         drawn = chart.of_trend([])
         self.assertTrue(drawn.empty)
-        self.assertEqual(drawn.rolling_path, '')
+        self.assertEqual(drawn.rolling_segments, ())
         self.assertEqual(drawn.y_max, chart.SMALLEST_Y_MAX_PCT)
 
     def test_a_low_rate_keeps_the_smallest_scale_so_noise_does_not_look_like_a_crisis(self) -> None:
@@ -47,11 +47,11 @@ class TestChart(unittest.TestCase):
 
     def test_zero_percent_sits_on_the_bottom_of_the_plot(self) -> None:
         dot = chart.of_trend(_points([0.0])).dots[0]
-        self.assertEqual(dot.y, chart.PADDING_TOP + chart.PLOT_HEIGHT)
+        self.assertEqual(dot.y, chart.PLOT_BOTTOM)
 
     def test_the_scale_maximum_sits_on_the_top_of_the_plot(self) -> None:
         drawn = chart.of_trend(_points([50.0]))
-        self.assertEqual(drawn.dots[0].y, chart.PADDING_TOP)
+        self.assertEqual(drawn.dots[0].y, chart.PLOT_TOP)
 
     def test_a_day_with_no_classifiable_builds_gets_no_dot_rather_than_a_zero(self) -> None:
         drawn = chart.of_trend(_points([10.0, None, 20.0]))
@@ -63,18 +63,22 @@ class TestChart(unittest.TestCase):
         self.assertIn(FIRST_DAY.isoformat(), title)
 
     def test_the_rolling_line_breaks_where_the_data_does(self) -> None:
-        path = chart.of_trend(_points([10.0, None, 20.0])).rolling_path
-        self.assertEqual(path.count('M'), 2)
+        drawn = chart.of_trend(_points([10.0, 20.0, None, 30.0, 40.0]))
+        missing_day_x = chart.PLOT_LEFT + chart.PLOT_WIDTH * 2.5 / 5
+        self.assertEqual(len(drawn.rolling_segments), 2)
+        for segment in drawn.rolling_segments:
+            self.assertFalse(segment.x1 < missing_day_x < segment.x2)
 
     def test_the_rolling_line_is_one_stroke_where_the_data_is_continuous(self) -> None:
-        path = chart.of_trend(_points([10.0, 20.0, 30.0])).rolling_path
-        self.assertEqual(path.count('M'), 1)
-        self.assertEqual(path.count('L'), 2)
+        segments = chart.of_trend(_points([10.0, 20.0, 30.0])).rolling_segments
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0].x2, segments[1].x1)
+        self.assertEqual(segments[0].y2, segments[1].y1)
 
     def test_dots_stay_inside_the_plot_horizontally(self) -> None:
         drawn = chart.of_trend(_points([10.0] * 30))
-        self.assertGreater(drawn.dots[0].x, chart.PADDING_LEFT)
-        self.assertLess(drawn.dots[-1].x, chart.PADDING_LEFT + chart.PLOT_WIDTH)
+        self.assertGreater(drawn.dots[0].x, chart.PLOT_LEFT)
+        self.assertLess(drawn.dots[-1].x, chart.PLOT_RIGHT)
 
     def test_a_deployment_is_marked_where_it_happened_in_the_series(self) -> None:
         deployment = config.Deployment(
@@ -82,14 +86,14 @@ class TestChart(unittest.TestCase):
             label='read', detail='a deployment',
         )
         drawn = chart.of_trend(_points([10.0] * 5), [deployment])
-        middle = chart.PADDING_LEFT + chart.PLOT_WIDTH / 2
+        middle = chart.PLOT_LEFT + chart.PLOT_WIDTH / 2
         self.assertAlmostEqual(drawn.deployments[0].x, middle, places=0)
         self.assertIn('a deployment', drawn.deployments[0].title)
 
     def test_a_single_day_series_is_drawn_rather_than_dividing_by_zero(self) -> None:
         drawn = chart.of_trend(_points([10.0]))
         self.assertEqual(len(drawn.dots), 1)
-        self.assertAlmostEqual(drawn.dots[0].x, chart.PADDING_LEFT + chart.PLOT_WIDTH / 2, places=0)
+        self.assertAlmostEqual(drawn.dots[0].x, chart.PLOT_LEFT + chart.PLOT_WIDTH / 2, places=0)
 
     def test_the_last_day_is_always_labelled(self) -> None:
         drawn = chart.of_trend(_points([10.0] * 30))

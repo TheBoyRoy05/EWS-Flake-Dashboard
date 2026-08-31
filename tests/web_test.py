@@ -174,11 +174,11 @@ class TestFreshnessDismissal(WebTest):
         self.assertIn('Blame noise over 14 days', self.page('/?days=14'))
         self.assertIn('Blame noise over 7 days', self.page('/'))
 
-    def rolling_path(self, page: str) -> str:
-        """The rolling line the page drew, which has one point per day the average could cover."""
-        drawn = re.search(r'<path class="rolling" d="([^"]*)"', page)
-        self.assertIsNotNone(drawn, 'the page drew no rolling line')
-        return drawn.group(1)
+    def rolling_segments(self, page: str) -> int:
+        """How many segments the rolling line the page drew is made of, one per pair of covered days."""
+        drawn = re.findall(r'<line class="rolling"', page)
+        self.assertTrue(drawn, 'the page drew no rolling line')
+        return len(drawn)
 
     def test_a_rolling_average_is_linkable_and_an_unknown_one_falls_back(self) -> None:
         self.store_build(1, first=['fast/pre.html'], second=['fast/pre.html'], clean=[])
@@ -191,8 +191,8 @@ class TestFreshnessDismissal(WebTest):
         self.store_build(1, first=['fast/pre.html'], second=['fast/pre.html'], clean=[],
                          started_at=int(time.time()) - 5 * 86400)
         self.classify_everything({'fast/pre.html': UNRELIABLE}, days=6)
-        self.assertGreater(self.rolling_path(self.page('/?rolling=14')).count('L'),
-                           self.rolling_path(self.page('/?rolling=3')).count('L'))
+        self.assertGreater(self.rolling_segments(self.page('/?rolling=14')),
+                           self.rolling_segments(self.page('/?rolling=3')))
 
     def _blamed_here_clean_elsewhere(self) -> None:
         """One blamed build on the layout queue, one clean build on another, so a filter that does
@@ -389,7 +389,7 @@ class TestExploreDrillDown(WebTest):
         self.assertIn('<span class="state state-unknown">unclassified</span>', page)
         self.assertIn('No refresh has classified this build yet, so nothing below has been looked '
                       'up.', page)
-        self.assertNotIn(formatting.BUCKET_WORDS[false_positive.CLEAN], page)
+        self.assertNotIn(f'<span class="state state-{false_positive.CLEAN}">', page)
 
     def test_the_builds_pane_discloses_how_many_failing_builds_it_is_not_showing(self) -> None:
         for number in (1, 2, 3):
@@ -412,6 +412,132 @@ class TestExploreDrillDown(WebTest):
         self.assertIn(f'<span class="state state-{formatting.NO_SURFACED}">'
                       f'{formatting.BUCKET_WORDS[formatting.NO_SURFACED]}</span>', page)
         self.assertNotIn('<span class="state state-unknown">unclassified</span>', page)
+
+
+class TestExploreBuildFilter(WebTest):
+    """The builds pane's own filter: a details and a GET form, since the app ships no JavaScript and
+    a narrowed pane has to be a URL a reader can link and go back from."""
+
+    def listed_builds(self, page: str) -> list:
+        """The builds the pane listed, as the ids its entries link to."""
+        return re.findall(r'<a class="entry[^"]*" href="[^"]*build=(\d+)', page)
+
+    def entry_link(self, page: str, pattern: str) -> str:
+        found = re.search(rf'<a class="entry[^"]*" href="([^"]*{re.escape(pattern)}[^"]*)"', page)
+        self.assertIsNotNone(found, f'the page rendered no entry matching {pattern}')
+        return found.group(1).replace('&amp;', '&')
+
+    def three_states(self) -> dict:
+        """One build in each of three states, and three sizes with them: all noise showing one test,
+        a real failure showing one, and a partly-noise build showing three."""
+        builds = {
+            'noise': self.store_build(1, first=['fast/pre.html'], second=['fast/pre.html'],
+                                      clean=[]),
+            'real': self.store_build(2, first=['fast/real.html'], second=['fast/real.html'],
+                                     clean=[]),
+            'mixed': self.store_build(3, first=['fast/pre.html', 'fast/other.html',
+                                                'fast/real.html'],
+                                      second=['fast/pre.html', 'fast/other.html',
+                                              'fast/real.html'],
+                                      clean=[]),
+        }
+        self.classify_everything({'fast/pre.html': UNRELIABLE, 'fast/other.html': UNRELIABLE,
+                                 'fast/real.html': RELIABLE})
+        return builds
+
+    def test_a_state_filter_lists_only_the_builds_in_that_state(self) -> None:
+        builds = self.three_states()
+        self.assertEqual(self.listed_builds(self.page(f'/explore?state={false_positive.FALSE_RED}')),
+                         [str(builds['noise'])])
+
+    def test_two_states_asked_for_together_list_the_builds_in_either_of_them(self) -> None:
+        builds = self.three_states()
+        page = self.page(f'/explore?state={false_positive.FALSE_RED}'
+                         f'&state={false_positive.PARTIAL_FP}')
+        self.assertEqual(sorted(self.listed_builds(page)),
+                         sorted((str(builds['noise']), str(builds['mixed']))))
+
+    def test_a_build_no_refresh_has_reached_is_filterable_as_unclassified(self) -> None:
+        self.three_states()
+        unreached = self.store_build(4, first=['fast/new.html'], second=['fast/new.html'], clean=[])
+        self.assertEqual(self.listed_builds(self.page(f'/explore?state={formatting.UNCLASSIFIED}')),
+                         [str(unreached)])
+
+    def test_a_range_keeps_the_builds_sitting_exactly_on_either_bound(self) -> None:
+        builds = self.three_states()
+        small = sorted((str(builds['noise']), str(builds['real'])))
+        self.assertEqual(sorted(self.listed_builds(self.page('/explore?min_shown=1&max_shown=1'))),
+                         small)
+        self.assertEqual(self.listed_builds(self.page('/explore?min_shown=3')),
+                         [str(builds['mixed'])])
+        self.assertEqual(sorted(self.listed_builds(self.page('/explore?min_shown=1&max_shown=3'))),
+                         sorted(str(each) for each in builds.values()))
+
+    def test_a_state_that_is_not_a_state_is_ignored_rather_than_emptying_the_pane(self) -> None:
+        builds = self.three_states()
+        self.assertEqual(sorted(self.listed_builds(self.page('/explore?state=NotAState'))),
+                         sorted(str(each) for each in builds.values()))
+
+    def test_a_bound_that_is_not_a_number_is_ignored_rather_than_raising(self) -> None:
+        builds = self.three_states()
+        self.assertEqual(sorted(self.listed_builds(self.page('/explore?min_shown=&max_shown=lots'))),
+                         sorted(str(each) for each in builds.values()))
+
+    def test_a_minimum_above_the_maximum_narrows_to_nothing_rather_than_failing(self) -> None:
+        self.three_states()
+        page = self.page('/explore?min_shown=3&max_shown=1')
+        self.assertEqual(self.listed_builds(page), [])
+        self.assertIn('No failing builds in this window match this filter.', page)
+
+    def test_a_narrowed_pane_counts_against_what_matched_not_every_failing_build(self) -> None:
+        self.three_states()
+        self.assertIn('<span class="tally">1 shown of 1 matching</span>',
+                      self.page(f'/explore?state={false_positive.FALSE_RED}'))
+
+    def test_an_unnarrowed_pane_still_counts_against_every_failing_build(self) -> None:
+        self.three_states()
+        with mock.patch.object(web_app, 'BUILDS_SHOWN', 2):
+            self.assertIn('<span class="tally">2 of 3</span>', self.page('/explore'))
+
+    def test_a_narrowed_pane_says_how_many_matched_beyond_the_page_it_shows(self) -> None:
+        self.three_states()
+        with mock.patch.object(web_app, 'BUILDS_SHOWN', 2):
+            page = self.page('/explore?min_shown=1')
+        self.assertEqual(len(self.listed_builds(page)), 2)
+        self.assertIn('<span class="tally">2 shown of 3 matching</span>', page)
+
+    def test_a_matching_build_older_than_the_page_is_still_listed(self) -> None:
+        """Narrowing the page instead of the window read as no build in 90 days having been all
+        noise when the only build that was is older than the newest `BUILDS_SHOWN`."""
+        now = int(time.time())
+        noise = self.store_build(1, first=['fast/pre.html'], second=['fast/pre.html'], clean=[],
+                                 started_at=now - 4 * 3600)
+        for number in (2, 3):
+            self.store_build(number, first=['fast/real.html'], second=['fast/real.html'], clean=[],
+                             started_at=now - number * 600)
+        self.classify_everything({'fast/pre.html': UNRELIABLE, 'fast/real.html': RELIABLE})
+        with mock.patch.object(web_app, 'BUILDS_SHOWN', 2):
+            page = self.page(f'/explore?state={false_positive.FALSE_RED}')
+        self.assertEqual(self.listed_builds(page), [str(noise)])
+        self.assertIn('<span class="tally">1 shown of 1 matching</span>', page)
+        self.assertNotIn('No failing builds in this window match this filter.', page)
+
+    def test_the_filter_travels_with_the_links_the_page_renders_and_holds_when_one_is_followed(self) -> None:
+        builds = self.three_states()
+        page = self.page(f'/explore?state={false_positive.FALSE_RED}&min_shown=1&max_shown=2')
+        build_link = self.entry_link(page, f'build={builds["noise"]}')
+        for link in (build_link, self.entry_link(page, f'builder={fixtures.LAYOUT_BUILDER}')):
+            self.assertIn(f'state={false_positive.FALSE_RED}', link)
+            self.assertIn('min_shown=1', link)
+            self.assertIn('max_shown=2', link)
+        self.assertEqual(self.listed_builds(self.page(build_link)), [str(builds['noise'])])
+
+    def test_a_chosen_state_comes_back_checked_so_the_dropdown_reads_as_what_it_did(self) -> None:
+        self.three_states()
+        page = self.page(f'/explore?state={false_positive.FALSE_RED}')
+        self.assertIn(f'<input type="checkbox" name="state" value="{false_positive.FALSE_RED}"'
+                      ' checked>', page)
+        self.assertIn(f'<input type="checkbox" name="state" value="{false_positive.CLEAN}">', page)
 
 
 class TestEscapes(WebTest):
@@ -477,6 +603,60 @@ class TestEscapes(WebTest):
         page = self.page(f'/escapes?builder={fixtures.GTK_BUILDER}')
         self.assertNotIn('fast/a.html', page)
         self.assertIn('No escapes decided in this window', page)
+
+    def test_a_verdict_drilled_into_lists_its_convictions_and_why(self) -> None:
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=72555,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.CONTAINED, failed_after=0,
+                            runs_after=5)
+        page = self.page(f'/escapes?verdict={escapes.CONTAINED}')
+        self.assertIn('Main ran it 5 times after the landing and never failed it.', page)
+        self.assertIn('pull/72555', page)
+
+    def test_a_verdict_that_is_not_a_verdict_is_ignored_rather_than_refused(self) -> None:
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.CONTAINED, failed_after=0)
+        page = self.page('/escapes?verdict=NONSENSE')
+        self.assertNotIn('never failed it', page)
+
+    def test_the_verdict_being_drilled_into_survives_a_change_of_queue_or_window(self) -> None:
+        """The drill-down is a query parameter, so a link that dropped it would close the card the
+        moment a reader narrowed the page."""
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.CONTAINED, failed_after=0)
+        page = self.page(f'/escapes?verdict={escapes.CONTAINED}')
+        self.assertRegex(page, rf'class="badge active" href="[^"]*verdict={escapes.CONTAINED}')
+        self.assertRegex(page, rf'class="entry[^"]*" href="[^"]*verdict={escapes.CONTAINED}')
+
+    def test_the_escaped_count_links_to_the_card_that_already_lists_them(self) -> None:
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
+        page = self.page('/escapes')
+        self.assertIn('<a href="#ESCAPED">', page)
+        self.assertIn('<div class="section" id="ESCAPED">', page)
+        self.assertNotIn(f'verdict={escapes.ESCAPED}', page)
+
+
+class TestMethodologyDisclosure(WebTest):
+    """The methodology prose went unread sitting open at the bottom of a page, so it is collapsed
+    behind a details, which the browser opens without the JavaScript this app does not ship."""
+
+    DISCLOSURE = '<details class="caveats-disclosure">'
+
+    def assert_collapsed(self, path: str, prose: str) -> None:
+        page = self.page(path)
+        self.assertIn(self.DISCLOSURE, page)
+        self.assertNotIn('caveats-disclosure" open', page)
+        self.assertIn(prose, page)
+
+    def test_the_landing_methodology_is_present_and_collapsed(self) -> None:
+        self.assert_collapsed('/', 'every rate here is a floor on blame noise')
+
+    def test_the_escape_methodology_is_present_and_collapsed(self) -> None:
+        self.assert_collapsed('/escapes', 'Every other number on this dashboard is a floor')
 
 
 class TestReadOnly(WebTest):

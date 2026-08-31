@@ -28,6 +28,7 @@
     --gap: 12px;
     --tiny: 0.78rem;
     --small: 0.85rem;
+    --pane-height: 560px;
 }
 
 * {
@@ -149,10 +150,6 @@ code {
     display: block;
 }
 
-.filters {
-    align-items: center;
-}
-
 .chooser {
     display: flex;
     align-items: center;
@@ -163,6 +160,10 @@ code {
 
 .chooser.start {
     justify-content: flex-start;
+}
+
+.chooser.groups {
+    gap: var(--gap);
 }
 
 /* The overview reads left to right the way the explore page does: the queue rail picks what
@@ -180,13 +181,36 @@ code {
 .scope > .pane.queues {
     position: sticky;
     top: var(--gap);
-    max-height: 62vh;
+    max-height: var(--pane-height);
     margin-bottom: var(--gap);
 }
 
 .scoped {
     flex: 1 1 auto;
     min-width: 0;
+}
+
+/* A banded scope is one card beside the rail, both told the same height in pixels. A viewport height
+   cannot square them: a card is as tall as its own rows, so the two agree at one window and one row
+   count and nowhere else. The card scrolls its body instead of growing, which is what the rail beside
+   it already does. */
+
+.scope.banded > .pane.queues {
+    max-height: none;
+    height: var(--pane-height);
+}
+
+.scope.banded > .scoped > .section {
+    display: flex;
+    flex-direction: column;
+    height: var(--pane-height);
+    margin-bottom: 0;
+}
+
+.scope.banded > .scoped > .section:not(.chart) > .content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
 }
 
 .badge {
@@ -339,7 +363,7 @@ code {
     display: flex;
     gap: var(--gap);
     align-items: stretch;
-    max-height: 62vh;
+    max-height: var(--pane-height);
     margin-bottom: var(--gap);
 }
 
@@ -461,7 +485,7 @@ code {
     color: var(--good);
 }
 
-.state-PARTIAL_FP, .state-no_history, .state-FLAKY_ON_MAIN {
+.state-PARTIAL_FP, .state-no_history, .state-FAILS_ON_MAIN {
     background: var(--warn-bg);
     border-color: rgba(227, 171, 99, 0.32);
     color: var(--warn);
@@ -474,7 +498,7 @@ code {
 }
 
 .state-UNDETERMINED, .state-unqueried, .state-unknown, .state-no_surfaced,
-.state-ALREADY_FAILING, .state-NO_RUNS, .state-NO_BASELINE, .state-TREE_DIVERGED {
+.state-NO_RUNS, .state-NO_BASELINE, .state-TREE_DIVERGED {
     background: var(--panel-raised);
     border-color: var(--border);
     color: var(--muted);
@@ -608,12 +632,13 @@ code {
 
 /* Trend chart */
 
-/* The chart card is exactly as tall as the queue rail beside it, so the row reads as one band. The
-   svg fills that card rather than deciding its own height from the viewBox. */
+/* The chart card is exactly as tall as the queue rail beside it, so the row reads as one band. The svg
+   has no viewBox: its coordinates are percentages of the box these rules give it, so the height below
+   is the height the plot is drawn against. */
 .section.chart {
     display: flex;
     flex-direction: column;
-    height: 62vh;
+    height: var(--pane-height);
 }
 
 .section.chart > .content {
@@ -638,13 +663,14 @@ code {
 
 .trend .axis {
     fill: var(--faint);
-    font-size: 10px;
+    font-size: var(--tiny);
 }
 
 .trend .rolling {
     fill: none;
     stroke: var(--accent);
     stroke-width: 2;
+    stroke-linecap: round;
 }
 
 .trend .daily {
@@ -659,7 +685,7 @@ code {
 
 .trend .deployment-label {
     fill: var(--good);
-    font-size: 10px;
+    font-size: var(--tiny);
 }
 
 .legend {
@@ -683,15 +709,39 @@ code {
     background-size: 6px 3px;
 }
 
-/* The rules table and the caveats share one card: how to read a conviction count is part of reading
-   it, and as its own card the qualification sat a screen below the number it qualified. */
+/* The rules table and the methodology share one card: how to read a conviction count is part of
+   reading it, and as its own card the qualification sat a screen below the number it qualified. The
+   prose is collapsed behind a details, like the builds filter, because this app ships no JavaScript
+   and open on the page it went unread. */
+.caveats-disclosure {
+    margin-top: var(--pad);
+    padding-top: var(--pad);
+    border-top: 1px solid var(--border-soft);
+}
+
+.caveats-disclosure > summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: var(--tiny);
+}
+
+.caveats-disclosure > summary:hover {
+    color: var(--ink);
+}
+
+/* Its own card on the escape page, where the method is long enough to read as a footnote rather than
+   as part of the table above it. */
+.section > .content > .caveats-disclosure:first-child {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
+}
+
 .caveats {
     display: flex;
     flex-wrap: wrap;
     gap: var(--gap);
     margin-top: var(--pad);
-    padding-top: var(--pad);
-    border-top: 1px solid var(--border-soft);
 }
 
 .caveats p {
@@ -700,10 +750,74 @@ code {
     margin: 0;
 }
 
-/* Its own card on the escape page, where the method is long enough to read as a footnote rather than
-   as part of the table above it. */
-.section > .content > .caveats:first-child {
-    margin-top: 0;
-    padding-top: 0;
-    border-top: none;
+/* The builds pane's filter. It opens into the pane header rather than over the list, because the
+   pane clips its overflow and a positioned dropdown would be cut off at the header's edge. */
+
+.pane.builds > .head { flex-wrap: wrap; }
+.pane.builds > .head .name { margin-right: auto; }
+
+.builds-filter {
+    font-size: var(--tiny);
+}
+
+.builds-filter[open] {
+    flex-basis: 100%;
+}
+
+.builds-filter > summary {
+    cursor: pointer;
+    color: var(--faint);
+    list-style: none;
+}
+
+.builds-filter > summary::-webkit-details-marker {
+    display: none;
+}
+
+.builds-filter > summary:hover {
+    color: var(--ink);
+}
+
+.builds-filter .filter-form {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 8px 0 4px;
+    border-bottom: none;
+}
+
+.builds-filter .states {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.builds-filter label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+}
+
+.builds-filter .range,
+.builds-filter .actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.builds-filter input[type=number] {
+    width: 4.5em;
+    padding: 3px 7px;
+    border-radius: var(--radius-small);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--ink);
+    font: inherit;
+    font-size: var(--tiny);
+}
+
+.builds-filter input[type=number]:focus {
+    outline: none;
+    border-color: var(--accent);
 }

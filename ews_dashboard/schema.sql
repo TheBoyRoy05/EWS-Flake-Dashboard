@@ -220,7 +220,7 @@ CREATE TABLE IF NOT EXISTS escape_verdicts (
     test_name       TEXT    NOT NULL,
 
     verdict         TEXT    NOT NULL CHECK (verdict IN (
-                        'ESCAPED', 'FLAKY_ON_MAIN', 'CONTAINED', 'ALREADY_FAILING',
+                        'ESCAPED', 'FAILS_ON_MAIN', 'CONTAINED',
                         'NO_RUNS', 'NO_BASELINE', 'TREE_DIVERGED'
                     )),
 

@@ -4,18 +4,21 @@
 {% block title %}EWS flake detection — explore{% endblock %}
 
 {% block content %}
+{% set filter_args = {'state': build_filter.states, 'min_shown': build_filter.min_shown, 'max_shown': build_filter.max_shown} %}
+{% set selected_build = detail.build['build_id'] if detail else None %}
 {{ staleness(freshness, freshness_dismissed) }}
 
 <div class="row headline">
-  <div class="col-8">
+  <div class="col-4">
     <span class="text large">Explore</span>
     <span class="text tiny">{% if builder and suite %}{{ builder }}, {{ suite }}{% else %}{{ builder or suite or 'all queues' }}{% endif %}, last {{ window.days }} days</span>
   </div>
-  <div class="col-4 align-right">{{ window_chooser('explore', window, window_choices, suite=suite, builder=builder) }}</div>
-</div>
-
-<div class="row filters">
-  <div class="col-12">{{ suite_chooser('explore', window, suite_choices, suite, builder=builder) }}</div>
+  <div class="col-8">
+    <div class="chooser groups">
+      {{ suite_chooser('explore', window, suite_choices, suite, builder=builder, filter_args=filter_args) }}
+      {{ window_chooser('explore', window, window_choices, suite=suite, builder=builder, filter_args=filter_args) }}
+    </div>
+  </div>
 </div>
 
 <div class="row metrics">
@@ -35,19 +38,53 @@
 </div>
 
 <div class="panes">
-  {{ queue_pane('explore', window, queue_activity, suite, builder) }}
+  {{ queue_pane('explore', window, queue_activity, suite, builder, filter_args=filter_args) }}
 
   <div class="pane builds">
     <div class="head">
       <span class="name">Failing builds</span>
+      {% if builds_matched is not none %}
+      {% set shown = builds | length %}
+      <span class="tally">{{ shown }} shown of {{ builds_matched | count }} matching</span>
+      {% else %}
       <span class="tally">{{ builds | length }}{% if builds_total > builds | length %} of {{ builds_total | count }}{% endif %}</span>
+      {% endif %}
+      {# A details rather than a menu, and a GET form rather than a handler: this app ships no
+         JavaScript, so the dropdown is markup the browser opens and a filtered pane is a URL. #}
+      <details class="builds-filter"{{ ' open' if build_filter.narrowing }}>
+        <summary>Filter</summary>
+        <form class="filter-form" method="get" action="{{ url_for('explore') }}">
+          <input type="hidden" name="days" value="{{ window.days }}">
+          {% if suite %}<input type="hidden" name="suite" value="{{ suite }}">{% endif %}
+          {% if builder %}<input type="hidden" name="builder" value="{{ builder }}">{% endif %}
+          {% if detail %}<input type="hidden" name="build" value="{{ detail.build['build_id'] }}">{% endif %}
+          {% if test_filter %}<input type="hidden" name="test" value="{{ test_filter }}">{% endif %}
+          {% if rule %}<input type="hidden" name="rule" value="{{ rule }}">{% endif %}
+          <span class="states">
+            {% for choice in state_choices %}
+            <label><input type="checkbox" name="state" value="{{ choice }}"{{ ' checked' if choice in build_filter.states }}>{{ choice | state }}</label>
+            {% endfor %}
+          </span>
+          <span class="range">
+            <input type="number" name="min_shown" min="0" value="{{ build_filter.min_shown if build_filter.min_shown is not none }}" placeholder="min" aria-label="Fewest failures shown">
+            <span class="text tiny">to</span>
+            <input type="number" name="max_shown" min="0" value="{{ build_filter.max_shown if build_filter.max_shown is not none }}" placeholder="max" aria-label="Most failures shown">
+            <span class="text tiny">shown</span>
+          </span>
+          <span class="actions">
+            <button type="submit">Filter</button>
+            <a class="badge{{ ' active' if not build_filter.states }}" href="{{ url_for('explore', days=window.days, suite=suite, builder=builder, build=selected_build, test=test_filter, rule=rule, min_shown=build_filter.min_shown, max_shown=build_filter.max_shown) }}">all states</a>
+            {% if build_filter.narrowing %}<a class="badge" href="{{ url_for('explore', days=window.days, suite=suite, builder=builder, build=selected_build, test=test_filter, rule=rule) }}">clear</a>{% endif %}
+          </span>
+        </form>
+      </details>
     </div>
     <div class="body">
       {% if not builds %}
-      <div class="placeholder">No failing builds in this window.</div>
+      <div class="placeholder">{% if build_filter.narrowing %}No failing builds in this window match this filter.{% else %}No failing builds in this window.{% endif %}</div>
       {% endif %}
       {% for summary in builds %}
-      <a class="entry{{ ' selected' if detail and detail.build['build_id'] == summary.build['build_id'] }}{{ ' noise' if summary.state in blames_noise }}" href="{{ url_for('explore', days=window.days, suite=suite, builder=builder, build=summary.build['build_id']) }}">
+      <a class="entry{{ ' selected' if detail and detail.build['build_id'] == summary.build['build_id'] }}{{ ' noise' if summary.state in blames_noise }}" href="{{ url_for('explore', days=window.days, suite=suite, builder=builder, build=summary.build['build_id'], **filter_args) }}">
         <span class="line">
           <span class="label">{{ summary.build['builder'] }} #{{ summary.build['build_number'] }}</span>
           <span class="when">{{ summary.build['started_at'] | moment }}</span>
@@ -67,9 +104,9 @@
     <div class="placeholder">Pick a build to see the tests it showed its author, and which of them were already failing on main.</div>
     {% else %}
     <div class="breadcrumb">
-      <a href="{{ url_for('explore', days=window.days, suite=suite) }}">all queues</a>
+      <a href="{{ url_for('explore', days=window.days, suite=suite, **filter_args) }}">all queues</a>
       <span class="separator">/</span>
-      <a href="{{ url_for('explore', days=window.days, suite=suite, builder=detail.build['builder']) }}">{{ detail.build['builder'] }}</a>
+      <a href="{{ url_for('explore', days=window.days, suite=suite, builder=detail.build['builder'], **filter_args) }}">{{ detail.build['builder'] }}</a>
       <span class="separator">/</span>
       <a href="{{ links.build(detail.build['builder_id'], detail.build['build_number']) }}">#{{ detail.build['build_number'] }}</a>
       <span class="state {{ detail.state | state_class }}">{{ detail.state | state }}</span>
@@ -111,9 +148,12 @@
       {% if suite %}<input type="hidden" name="suite" value="{{ suite }}">{% endif %}
       {% if builder %}<input type="hidden" name="builder" value="{{ builder }}">{% endif %}
       <input type="hidden" name="build" value="{{ detail.build['build_id'] }}">
+      {% for chosen in build_filter.states %}<input type="hidden" name="state" value="{{ chosen }}">{% endfor %}
+      {% if build_filter.min_shown is not none %}<input type="hidden" name="min_shown" value="{{ build_filter.min_shown }}">{% endif %}
+      {% if build_filter.max_shown is not none %}<input type="hidden" name="max_shown" value="{{ build_filter.max_shown }}">{% endif %}
       <input type="search" name="test" value="{{ test_filter or '' }}" placeholder="filter these tests by name" aria-label="Filter tests by name">
       <button type="submit">Filter</button>
-      {% if test_filter %}<a class="badge" href="{{ url_for('explore', days=window.days, suite=suite, builder=builder, build=detail.build['build_id']) }}">clear</a>{% endif %}
+      {% if test_filter %}<a class="badge" href="{{ url_for('explore', days=window.days, suite=suite, builder=builder, build=detail.build['build_id'], **filter_args) }}">clear</a>{% endif %}
     </form>
     {% endif %}
     <div class="body">
@@ -169,7 +209,7 @@
           <td class="numeric">{{ test.convictions | count }}</td>
           <td>
             {% if test.queues > 1 %}{{ test.queues }}{% else %}
-            <a href="{{ url_for('explore', days=window.days, suite=suite, builder=test.builder) }}">{{ test.builder }}</a>
+            <a href="{{ url_for('explore', days=window.days, suite=suite, builder=test.builder, **filter_args) }}">{{ test.builder }}</a>
             {% endif %}
           </td>
           <td class="when text tiny">{{ test.last_seen | moment }}</td>
@@ -185,7 +225,7 @@
     </table>
     {% if section.convicted.truncated and not rule %}
     <div class="more">
-      <a class="badge" href="{{ url_for('explore', days=window.days, suite=suite, builder=builder, rule=section.name) }}">Show all {{ section.convicted.total | count }}</a>
+      <a class="badge" href="{{ url_for('explore', days=window.days, suite=suite, builder=builder, rule=section.name, **filter_args) }}">Show all {{ section.convicted.total | count }}</a>
       <span class="text tiny">{{ section.convicted.truncated | count }} more convicted tests are not listed here.</span>
     </div>
     {% elif section.convicted.truncated %}

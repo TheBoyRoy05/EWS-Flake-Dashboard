@@ -20,6 +20,10 @@ MISSING = '—'
 # no denominator, which reads nothing like a build no refresh has reached.
 NO_SURFACED = 'no_surfaced'
 
+# Not a stored bucket either: no refresh has reached the build, which is what a reader filtering for
+# a gap in the data is looking for.
+UNCLASSIFIED = 'unclassified'
+
 # The stored name is what a page links and anchors on; these are what it reads as. Both a colour and
 # a word, because colour alone is unreadable to anyone who cannot separate red from green.
 BUCKET_WORDS = {
@@ -41,11 +45,15 @@ VERDICT_WORDS = {
 BLAMES_NOISE = frozenset((false_positive.PARTIAL_FP, false_positive.FALSE_RED,
                           false_positive.PRE_EXISTING))
 
+# Every state the builds pane can show a build in, in the order it reads best as a list of choices.
+STATE_CHOICES = (false_positive.CLEAN, false_positive.PARTIAL_FP, false_positive.FALSE_RED,
+                 false_positive.UNDETERMINED, NO_SURFACED, UNCLASSIFIED)
+
 
 def state(name: Optional[str]) -> str:
     """One bucket or verdict as a word. An unclassified build has no state name at all."""
     if name is None:
-        return 'unclassified'
+        return UNCLASSIFIED
     return BUCKET_WORDS.get(name) or VERDICT_WORDS.get(name) or name
 
 

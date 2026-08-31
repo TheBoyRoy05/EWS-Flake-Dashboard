@@ -78,6 +78,34 @@ class BuildSummary(Classified):
 
 
 @dataclass(frozen=True)
+class BuildFilter:
+    """What the builds pane is narrowed to inside the window and the scope.
+
+    An unknown state name and an unreadable bound are dropped rather than refused, because both
+    arrive from a hand-edited URL as readily as from the form; a minimum above the maximum is left
+    alone, so it narrows to nothing and says so.
+    """
+
+    states: tuple
+    min_shown: Optional[int]
+    max_shown: Optional[int]
+
+    @property
+    def narrowing(self) -> bool:
+        return bool(self.states) or self.min_shown is not None or self.max_shown is not None
+
+    def matches(self, summary: BuildSummary) -> bool:
+        if self.states and (summary.state or formatting.UNCLASSIFIED) not in self.states:
+            return False
+        shown = summary.surfaced_total or 0
+        if self.min_shown is not None and shown < self.min_shown:
+            return False
+        if self.max_shown is not None and shown > self.max_shown:
+            return False
+        return True
+
+
+@dataclass(frozen=True)
 class BuildDetail(Classified):
     """One build's own pane: what it showed its author, and why each test landed where it did."""
 
@@ -130,6 +158,24 @@ def _chosen_number(name: str, choices: tuple, default: int) -> int:
     except ValueError:
         return default
     return value if value in choices else default
+
+
+def _bound(name: str) -> Optional[int]:
+    """One end of a range, absent when the field was left empty or holds something that is not a
+    number."""
+    try:
+        return int(request.args[name])
+    except (KeyError, ValueError):
+        return None
+
+
+def _build_filter() -> BuildFilter:
+    return BuildFilter(
+        states=tuple(value for value in request.args.getlist('state')
+                     if value in formatting.STATE_CHOICES),
+        min_shown=_bound('min_shown'),
+        max_shown=_bound('max_shown'),
+    )
 
 
 def _window() -> Window:
@@ -250,11 +296,10 @@ def _explore_context(open_connection: sqlite3.Connection, window: Window) -> dic
     suite, builder = scope.suite, scope.builder
     test_filter = request.args.get('test') or None
     rule = _chosen('rule', config.FLAKINESS_RULES)
+    build_filter = _build_filter()
     classifier = false_positive.cached_classifier(open_connection)
-    rows = false_positive.failing_builds(
-        open_connection, window.since, window.until,
-        suite=suite, builder=builder, limit=BUILDS_SHOWN,
-    )
+    builds, builds_matched = _filtered_builds(open_connection, window, suite, builder, classifier,
+                                              build_filter)
     return dict(
         window=window,
         window_choices=WINDOW_CHOICES,
@@ -262,10 +307,13 @@ def _explore_context(open_connection: sqlite3.Connection, window: Window) -> dic
         suite=suite,
         suite_choices=SUITE_CHOICES,
         queue_activity=scope.queue_activity,
-        builds=[BuildSummary(row, classifier(row)) for row in rows],
+        builds=builds,
         builds_total=false_positive.failing_build_count(
             open_connection, window.since, window.until, suite=suite, builder=builder,
         ),
+        builds_matched=builds_matched,
+        build_filter=build_filter,
+        state_choices=formatting.STATE_CHOICES,
         detail=_build_detail(open_connection, classifier, test_filter),
         test_filter=test_filter,
         verdict_descriptions=false_positive.VERDICT_DESCRIPTIONS,
@@ -280,6 +328,53 @@ def _explore_context(open_connection: sqlite3.Connection, window: Window) -> dic
     )
 
 
+def _filtered_builds(
+    open_connection: sqlite3.Connection,
+    window: Window,
+    suite: Optional[str],
+    builder: Optional[str],
+    classifier: false_positive.Classifier,
+    build_filter: BuildFilter,
+) -> tuple:
+    """The builds pane's page, and how many builds in the whole window the filter matched.
+
+    A narrowed pane has to narrow before it takes its page: narrowing the newest `BUILDS_SHOWN`
+    instead read as "0 of 13,934" over 90 days for a state that only older builds are in. Fetching
+    the window unlimited to do it is affordable because the refresh has already classified every one
+    of these builds, so the classifier reads its answers back rather than deciding them. An
+    unnarrowed pane keeps the cheap page, since matching every build against a filter that matches
+    everything would classify thousands of rows to change nothing.
+    """
+    if not build_filter.narrowing:
+        rows = false_positive.failing_builds(
+            open_connection, window.since, window.until,
+            suite=suite, builder=builder, limit=BUILDS_SHOWN,
+        )
+        return _build_summaries(rows, classifier, build_filter), None
+    rows = false_positive.failing_builds(
+        open_connection, window.since, window.until, suite=suite, builder=builder,
+    )
+    matched = _build_summaries(rows, classifier, build_filter)
+    return matched[:BUILDS_SHOWN], len(matched)
+
+
+def _build_summaries(
+    rows: list,
+    classifier: false_positive.Classifier,
+    build_filter: BuildFilter,
+) -> list:
+    """The builds pane's rows, narrowed here rather than in the template.
+
+    Not narrowed in SQL: a row's state is the classification's bucket read through `Classified`,
+    which turns a missing bucket into `no_surfaced` and a missing classification into unclassified,
+    and none of those three are a column.
+    """
+    return [
+        summary for summary in (BuildSummary(row, classifier(row)) for row in rows)
+        if build_filter.matches(summary)
+    ]
+
+
 def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dict:
     """The escape page: what main did with each convicted test after the change landed.
 
@@ -287,6 +382,10 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
     page shows what the refresh has already decided and says how much it could not.
     """
     scope = _scope(open_connection, window)
+    requested = _chosen('verdict', escapes.VERDICTS)
+    verdict_shown = requested if requested != escapes.ESCAPED else None
+    drilled = escapes.convictions(open_connection, window.since, window.until, verdict_shown,
+                                  suite=scope.suite, builder=scope.builder) if verdict_shown else []
     return dict(
         window=window,
         window_choices=WINDOW_CHOICES,
@@ -298,6 +397,9 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
                             suite=scope.suite, builder=scope.builder),
         escaped=escapes.escaped(open_connection, window.since, window.until,
                                 suite=scope.suite, builder=scope.builder),
+        convictions=drilled,
+        verdict_shown=verdict_shown,
+        sentence=escapes.sentence,
         verdict_descriptions=escapes.VERDICT_DESCRIPTIONS,
         verdicts=escapes.VERDICTS,
         window_days=config.ESCAPE_WINDOW_DAYS,

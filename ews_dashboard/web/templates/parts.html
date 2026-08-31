@@ -1,34 +1,34 @@
-{% macro window_chooser(endpoint, window, choices, suite=None, builder=None, rolling=None) %}
+{% macro window_chooser(endpoint, window, choices, suite=None, builder=None, rolling=None, filter_args={}) %}
 <div class="chooser">
   <span class="text tiny">window</span>
   {% for choice in choices %}
-  <a class="badge{{ ' active' if choice == window.days }}" href="{{ url_for(endpoint, days=choice, suite=suite, builder=builder, rolling=rolling) }}">{{ choice }}d</a>
+  <a class="badge{{ ' active' if choice == window.days }}" href="{{ url_for(endpoint, days=choice, suite=suite, builder=builder, rolling=rolling, **filter_args) }}">{{ choice }}d</a>
   {% endfor %}
 </div>
 {% endmacro %}
 
-{% macro suite_chooser(endpoint, window, choices, suite, builder=None, rolling=None) %}
+{% macro suite_chooser(endpoint, window, choices, suite, builder=None, rolling=None, filter_args={}) %}
 <div class="chooser start">
   <span class="text tiny">suite</span>
-  <a class="badge{{ ' active' if not suite }}" href="{{ url_for(endpoint, days=window.days, builder=builder, rolling=rolling) }}">all</a>
+  <a class="badge{{ ' active' if not suite }}" href="{{ url_for(endpoint, days=window.days, builder=builder, rolling=rolling, **filter_args) }}">all</a>
   {% for choice in choices %}
-  <a class="badge{{ ' active' if choice == suite }}" href="{{ url_for(endpoint, days=window.days, suite=choice, builder=builder, rolling=rolling) }}">{{ choice }}</a>
+  <a class="badge{{ ' active' if choice == suite }}" href="{{ url_for(endpoint, days=window.days, suite=choice, builder=builder, rolling=rolling, **filter_args) }}">{{ choice }}</a>
   {% endfor %}
 </div>
 {% endmacro %}
 
-{% macro queue_pane(endpoint, window, queues, suite, builder, rolling=None) %}
+{% macro queue_pane(endpoint, window, queues, suite, builder, rolling=None, filter_args={}) %}
 <div class="pane queues">
   <div class="head">
     <span class="name">Queues</span>
     <span class="tally">{{ queues | length }}</span>
   </div>
   <div class="body">
-    <a class="entry{{ ' selected' if not builder }}" href="{{ url_for(endpoint, days=window.days, suite=suite, rolling=rolling) }}">
+    <a class="entry{{ ' selected' if not builder }}" href="{{ url_for(endpoint, days=window.days, suite=suite, rolling=rolling, **filter_args) }}">
       <span class="line"><span class="label">All queues</span></span>
     </a>
     {% for queue in queues %}
-    <a class="entry{{ ' selected' if queue.builder == builder }}" href="{{ url_for(endpoint, days=window.days, suite=suite, builder=queue.builder, rolling=rolling) }}">
+    <a class="entry{{ ' selected' if queue.builder == builder }}" href="{{ url_for(endpoint, days=window.days, suite=suite, builder=queue.builder, rolling=rolling, **filter_args) }}">
       <span class="line">
         <span class="label">{{ queue.builder }}</span>
         <span class="tally">{{ queue.convictions | count }}</span>

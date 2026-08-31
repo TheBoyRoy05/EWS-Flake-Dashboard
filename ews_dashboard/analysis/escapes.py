@@ -9,12 +9,11 @@ One convicted test in one build, whose pull request landed as a known commit on 
 bucket:
 
   ESCAPED          main failed it unexpectedly in ESCAPE_FAILURE_PCT or more of the runs after the
-                   landing, having failed none before: the conviction excused a real regression
-  FLAKY_ON_MAIN    it failed some of the runs after, under that share, which is the flakiness the
-                   build was told it was
+                   landing, having failed it under that share before: the conviction excused a real
+                   regression
+  FAILS_ON_MAIN    main fails it without the change, either flaking after the landing or already
+                   failing it before, so the conviction was corroborated
   CONTAINED        no unexpected failure on main after the landing
-  ALREADY_FAILING  main was failing it before the landing too, so nothing about this change decided
-                   what happened after
   NO_RUNS          nothing ran the test on main in the window after the landing
   NO_BASELINE      it failed after the landing, but nothing ran before it, so a regression cannot be
                    told from a failure main already had
@@ -41,32 +40,29 @@ from typing import Optional
 from ews_dashboard import config, results, webkit_checkout
 
 ESCAPED = 'ESCAPED'
-FLAKY_ON_MAIN = 'FLAKY_ON_MAIN'
+FAILS_ON_MAIN = 'FAILS_ON_MAIN'
 CONTAINED = 'CONTAINED'
-ALREADY_FAILING = 'ALREADY_FAILING'
 NO_RUNS = 'NO_RUNS'
 NO_BASELINE = 'NO_BASELINE'
 TREE_DIVERGED = 'TREE_DIVERGED'
 
-VERDICTS = (ESCAPED, FLAKY_ON_MAIN, CONTAINED, ALREADY_FAILING, NO_RUNS, NO_BASELINE,
-            TREE_DIVERGED)
+VERDICTS = (ESCAPED, FAILS_ON_MAIN, CONTAINED, NO_RUNS, NO_BASELINE, TREE_DIVERGED)
 
 # What answers nothing about the conviction, so it belongs in no rate.
-UNDECIDED_VERDICTS = (NO_RUNS, NO_BASELINE, TREE_DIVERGED, ALREADY_FAILING)
+UNDECIDED_VERDICTS = (NO_RUNS, NO_BASELINE, TREE_DIVERGED)
 
 VERDICT_DESCRIPTIONS = {
-    ESCAPED: 'main kept failing this after the change landed, so the conviction excused a real '
-             'regression',
-    FLAKY_ON_MAIN: 'main failed this some of the time after the change landed, which is the '
-                   'flakiness the build was told it was',
-    CONTAINED: 'main did not fail this after the change landed',
-    ALREADY_FAILING: 'main was failing this before the change landed, so what happened after says '
-                     'nothing about the change',
-    NO_RUNS: 'no bot ran this on main in the window after the change landed',
-    NO_BASELINE: 'it failed on main after the change landed, but nothing ran it before, so a '
+    ESCAPED: 'After the landing main started failing this and kept failing it, so the conviction '
+             'excused a real regression',
+    FAILS_ON_MAIN: 'Main fails this without the change, either flaking after the landing or '
+                   'already failing it before, so the build was told the truth',
+    CONTAINED: 'After the landing main did not fail this',
+    NO_RUNS: 'No bot ran this on main in the window after the change landed',
+    NO_BASELINE: 'It failed on main after the change landed, but nothing ran it before, so a '
                  'regression cannot be told from a failure main already had',
-    TREE_DIVERGED: 'a later build of the same pull request tested a different head, so what landed '
-                   'is not what this conviction was made on',
+    TREE_DIVERGED: 'This conviction was made on a version of the pull request that a later build '
+                   'superseded, so the code that landed is not the code it was made on and main '
+                   'cannot grade it',
 }
 
 # The pull requests a conviction cannot even be looked for on, counted from `landings` rather than
@@ -123,6 +119,38 @@ class Escape:
         if not self.runs_after:
             return None
         return round(100.0 * self.failed_after / self.runs_after, 1)
+
+
+@dataclass(frozen=True)
+class Conviction:
+    """One conviction main answered, and everything a reader needs to go and check the answer.
+
+    `heads` and `builds` count the pull request's builds rather than this one's, which is what says
+    how far the code that landed had moved from the code convicted here.
+    """
+
+    test_name: str
+    rule: str
+    verdict: str
+    build_id: int
+    builder: str
+    builder_id: int
+    build_number: int
+    pr_id: Optional[int]
+    configuration: results.Configuration
+    runs_before: int
+    failed_before: int
+    runs_after: int
+    failed_after: int
+    window_ends_at: int
+    tested_sha: Optional[str]
+    newest_sha: Optional[str]
+    heads: int
+    builds: int
+
+    @property
+    def landed_at(self) -> int:
+        return self.window_ends_at - ESCAPE_WINDOW_SECONDS
 
 
 @dataclass(frozen=True)
@@ -241,13 +269,13 @@ def decide(runs_before: list, runs_after: list) -> Verdict:
     if not failed_after:
         # A clean window after the landing needs no baseline: nothing failed, so nothing escaped.
         return Verdict(CONTAINED, **counts)
-    if failed_before:
-        return Verdict(ALREADY_FAILING, **counts)
     if not runs_before:
         return Verdict(NO_BASELINE, **counts)
-    if 100.0 * len(failed_after) / len(runs_after) >= config.ESCAPE_FAILURE_PCT:
+    after_pct = 100.0 * len(failed_after) / len(runs_after)
+    before_pct = 100.0 * len(failed_before) / len(runs_before)
+    if after_pct >= config.ESCAPE_FAILURE_PCT and before_pct < config.ESCAPE_FAILURE_PCT:
         return Verdict(ESCAPED, **counts)
-    return Verdict(FLAKY_ON_MAIN, **counts)
+    return Verdict(FAILS_ON_MAIN, **counts)
 
 
 def _runs_in(history: results.History, candidate: Candidate, after: int, before: int) -> list:
@@ -427,3 +455,86 @@ def escaped(connection: sqlite3.Connection, since: int, until: int, suite: Optio
             parameters,
         )
     ]
+
+
+def convictions(connection: sqlite3.Connection, since: int, until: int, verdict: str,
+                suite: Optional[str] = None, builder: Optional[str] = None,
+                limit: int = ESCAPES_LISTED) -> 'list[Conviction]':
+    """The individual convictions behind one verdict's count, newest landing first."""
+    conditions, parameters = _filters(suite, builder)
+    parameters.update({'since': since, 'until': until, 'verdict': verdict, 'limit': limit})
+    return [
+        Conviction(
+            test_name=row['test_name'],
+            rule=row['rule'],
+            verdict=row['verdict'],
+            build_id=row['build_id'],
+            builder=row['builder'],
+            builder_id=row['builder_id'],
+            build_number=row['build_number'],
+            pr_id=row['pr_id'],
+            configuration=results.Configuration.of_build(row),
+            runs_before=row['runs_before'],
+            failed_before=row['failed_before'],
+            runs_after=row['runs_after'],
+            failed_after=row['failed_after'],
+            window_ends_at=row['window_ends_at'],
+            tested_sha=row['tested_sha'],
+            newest_sha=row['newest_sha'],
+            heads=row['heads'],
+            builds=row['builds'],
+        )
+        for row in connection.execute(
+            f'''SELECT outcome.*, verdict.rule, build.builder, build.builder_id,
+                       build.build_number, build.pr_id, build.suite, build.platform,
+                       build.style, build.flavor, build.sha AS tested_sha,
+                       (SELECT newer.sha FROM build_verdicts AS newer
+                         WHERE newer.pr_id = build.pr_id AND newer.sha IS NOT NULL
+                         ORDER BY newer.started_at DESC, newer.build_id DESC LIMIT 1) AS newest_sha,
+                       (SELECT COUNT(DISTINCT other.sha) FROM build_verdicts AS other
+                         WHERE other.pr_id = build.pr_id AND other.sha IS NOT NULL) AS heads,
+                       (SELECT COUNT(*) FROM build_verdicts AS other
+                         WHERE other.pr_id = build.pr_id) AS builds
+                FROM escape_verdicts AS outcome
+                JOIN build_verdicts AS build USING (build_id)
+                JOIN latest_flakiness_verdicts AS verdict
+                  ON verdict.build_id = outcome.build_id AND verdict.test_name = outcome.test_name
+                WHERE outcome.verdict = :verdict AND {WINDOW}{conditions}
+                ORDER BY outcome.window_ends_at DESC
+                LIMIT :limit''',
+            parameters,
+        )
+    ]
+
+
+def _diverged_sentence(conviction: Conviction) -> str:
+    """What the heads say, with each piece dropped rather than rendered when it was never stored: a
+    build ingested before `github.head.sha` was recorded has no head to name."""
+    convicted = (f'Convicted on head {conviction.tested_sha[:8]}' if conviction.tested_sha
+                 else 'Convicted on a head this build did not record')
+    subject = f'PR {conviction.pr_id}' if conviction.pr_id is not None else 'the pull request'
+    landed = f' and landed as {conviction.newest_sha[:8]}' if conviction.newest_sha else ''
+    return (f'{convicted}, but {subject} was built {conviction.builds} times across '
+            f'{conviction.heads} heads{landed}.')
+
+
+def sentence(conviction: Conviction) -> str:
+    """Why this conviction reached the verdict it did, in the counts main was asked for."""
+    if conviction.verdict == FAILS_ON_MAIN:
+        return (f'Main failed it {conviction.failed_after} of {conviction.runs_after} runs after '
+                f'the landing against {conviction.failed_before} of {conviction.runs_before} '
+                'before, so the failure is main\'s and not this change\'s.')
+    if conviction.verdict == CONTAINED:
+        return f'Main ran it {conviction.runs_after} times after the landing and never failed it.'
+    if conviction.verdict == NO_RUNS:
+        return (f'No bot ran it on main in the {config.ESCAPE_WINDOW_DAYS} days after the landing, '
+                'so there is nothing to compare against.')
+    if conviction.verdict == NO_BASELINE:
+        return (f'Main failed it {conviction.failed_after} of {conviction.runs_after} runs after '
+                f'the landing, but nothing ran it in the {config.ESCAPE_WINDOW_DAYS} days before, '
+                'so a regression cannot be told from a failure main already had.')
+    if conviction.verdict == TREE_DIVERGED:
+        return _diverged_sentence(conviction)
+    return (f'Main failed it {conviction.failed_after} of {conviction.runs_after} runs after the '
+            f'landing, having failed it {conviction.failed_before} of {conviction.runs_before} '
+            f'before, under the {config.ESCAPE_FAILURE_PCT}% a regression needs.')
