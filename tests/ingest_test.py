@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import urllib.error
 from typing import Optional
 from unittest import mock
@@ -197,6 +198,24 @@ class TestBuilderWalk(fixtures.DatabaseTest):
         def lists(client: object, build_id: int, suite: object) -> ingest.FailureLists:
             if build_id != readable:
                 raise urllib.error.URLError('reset')
+            return ingest.FailureLists([], [], [])
+
+        with mock.patch.object(ingest, '_lists_from_retry_step_logs', side_effect=lists):
+            report = ingest.ingest_builder(self.connection, fixtures.WalkableBuildbot(builds),
+                                           fixtures.API_BUILDER)
+        self.assertEqual(report.outcomes['ingested'], 1)
+        self.assertEqual(report.failed, 1)
+        self.assertIn('build 2', str(report.errors[0]))
+
+    def test_a_scrape_that_times_out_is_recorded_rather_than_ending_the_refresh(self) -> None:
+        """A timed-out read reaches this path as a bare `socket.timeout`, which on Python 3.9 is
+        neither a TimeoutError nor a URLError, and took a whole 90-day refresh down with it."""
+        builds = [fixtures.build(number=number) for number in (2, 1)]
+        readable = builds[1]['buildid']
+
+        def lists(client: object, build_id: int, suite: object) -> ingest.FailureLists:
+            if build_id != readable:
+                raise socket.timeout('The read operation timed out')
             return ingest.FailureLists([], [], [])
 
         with mock.patch.object(ingest, '_lists_from_retry_step_logs', side_effect=lists):

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import ssl
 import time
 import unittest
 import urllib.error
@@ -99,6 +100,24 @@ class TestHistory(fixtures.DatabaseTest):
                         side_effect=[urllib.error.URLError('reset'), _responder(SUMMARY)(None)]), \
                 mock.patch('ews_dashboard.results.time.sleep'):
             self.assertEqual(self.history.pass_rate(self._query()), PASS_RATE)
+
+    def test_a_reset_connection_is_retried_like_any_other_dropped_read(self) -> None:
+        """A reset arrives as `ssl.SSLError`, an OSError that is none of ConnectionError,
+        TimeoutError or URLError, so enumerating those three let it past the retry loop and out of
+        `_get` as something `_fetch_without_raising` does not answer to."""
+        with mock.patch('ews_dashboard.results.urllib.request.urlopen',
+                        side_effect=[ssl.SSLError('Connection reset by peer (_ssl.c:2633)'),
+                                     _responder(SUMMARY)(None)]), \
+                mock.patch('ews_dashboard.results.time.sleep'):
+            self.assertEqual(self.history.pass_rate(self._query()), PASS_RATE)
+
+    def test_a_connection_that_keeps_resetting_reads_as_the_service_being_unavailable(self) -> None:
+        with mock.patch('ews_dashboard.results.urllib.request.urlopen',
+                        side_effect=ssl.SSLError('Connection reset by peer')) as urlopen, \
+                mock.patch('ews_dashboard.results.time.sleep'):
+            with self.assertRaises(results.HistoryUnavailable):
+                self.history.pass_rate(self._query())
+            self.assertEqual(urlopen.call_count, results.RETRY_ATTEMPTS)
 
     def test_a_stale_tip_of_tree_answer_is_re_fetched(self) -> None:
         with mock.patch('ews_dashboard.results.urllib.request.urlopen',
@@ -210,6 +229,22 @@ class TestHistory(fixtures.DatabaseTest):
             self.assertEqual(self.connection.execute(
                 'SELECT COUNT(*) FROM results_summary_cache').fetchone()[0], 0)
             self.assertEqual(self.history.stats['unavailable'], 1)
+
+    def test_prefetch_survives_a_reset_rather_than_ending_the_refresh_that_called_it(self) -> None:
+        """The reset that killed a two-hour refresh came out of this pool, past `_get` and past
+        `_fetch_without_raising`, at the classify step with every build already ingested."""
+        def answer(request: object, timeout: Optional[int] = None) -> object:
+            if 'fast/b.html' in request.full_url:
+                raise ssl.SSLError('Connection reset by peer (_ssl.c:2633)')
+            return _responder(SUMMARY)(request)
+
+        with mock.patch('ews_dashboard.results.urllib.request.urlopen', side_effect=answer), \
+                mock.patch('ews_dashboard.results.time.sleep'):
+            self.history.prefetch([self._query('fast/a.html'), self._query('fast/b.html')],
+                                  workers=1)
+        self.assertEqual([row['test_name'] for row in self.connection.execute(
+            'SELECT test_name FROM results_summary_cache')], ['fast/a.html'])
+        self.assertEqual(self.history.stats['unavailable'], 1)
 
     def _age_cache(self, seconds: int) -> None:
         with self.connection:

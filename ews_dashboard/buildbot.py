@@ -21,12 +21,14 @@ HTTP_TIMEOUT_SECONDS = 30
 RETRY_ATTEMPTS = 4
 RETRY_BACKOFF_SECONDS = 1.5
 
-# The v2 API raises this intermittently on large responses; it is a transient read, not a failure.
+# A dropped read is transient here, not a failure: the v2 API truncates large responses and resets
+# connections under load. Named by base class rather than one entry per failure, because every such
+# enumeration has come up an exception short — `socket.timeout` is an OSError that is not a
+# TimeoutError on Python 3.9, and `ssl.SSLError` is neither. Everything urlopen raises is an OSError
+# or an HTTPException; a truncated body that parses as nothing is the JSONDecodeError.
 TRANSIENT_ERRORS = (
-    urllib.error.URLError,
-    http.client.IncompleteRead,
-    ConnectionError,
-    TimeoutError,
+    OSError,
+    http.client.HTTPException,
     json.JSONDecodeError,
 )
 

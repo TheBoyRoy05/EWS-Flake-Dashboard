@@ -10,6 +10,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import socket
 import urllib.error
 import unittest
 from typing import Optional
@@ -240,3 +241,23 @@ class TestTransport(unittest.TestCase):
             self.assertEqual(self.client.builders(),
                              [{'name': fixtures.LAYOUT_BUILDER, 'id': BUILDER_ID}])
             self.assertEqual(urlopen.call_count, 2)
+
+    def test_a_read_that_times_out_is_retried_and_the_next_attempt_answers(self) -> None:
+        """On Python 3.9 `socket.timeout` is an OSError that is not a TimeoutError, so listing only
+        TimeoutError let a timed-out read past the retry loop and out of every caller's except."""
+        payload = {'builders': [{'name': fixtures.LAYOUT_BUILDER, 'builderid': BUILDER_ID}]}
+        with mock.patch('ews_dashboard.buildbot.urllib.request.urlopen',
+                        side_effect=[socket.timeout('The read operation timed out'),
+                                     _response(json.dumps(payload).encode())]) as urlopen, \
+                mock.patch('ews_dashboard.buildbot.time.sleep'):
+            self.assertEqual(self.client.builders(),
+                             [{'name': fixtures.LAYOUT_BUILDER, 'id': BUILDER_ID}])
+            self.assertEqual(urlopen.call_count, 2)
+
+    def test_a_read_that_keeps_timing_out_is_retried_and_then_raised(self) -> None:
+        with mock.patch('ews_dashboard.buildbot.urllib.request.urlopen',
+                        side_effect=socket.timeout('The read operation timed out')) as urlopen, \
+                mock.patch('ews_dashboard.buildbot.time.sleep'):
+            with self.assertRaises(socket.timeout):
+                self.client.builders()
+            self.assertEqual(urlopen.call_count, buildbot.RETRY_ATTEMPTS)

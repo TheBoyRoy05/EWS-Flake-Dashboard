@@ -66,11 +66,13 @@ RUNS_PER_QUERY = 100
 # The endpoint answers in about 1.6 seconds, so a few thousand lookups cost over an hour in series.
 PREFETCH_WORKERS = 16
 
+# Named by base class rather than one entry per failure: `ssl.SSLError` on a reset connection is an
+# OSError that is none of ConnectionError, TimeoutError or URLError, so an enumeration let it past
+# `_get` uncaught, and `_fetch_without_raising` only answers to HistoryUnavailable. Everything
+# urlopen raises is an OSError or an HTTPException.
 TRANSIENT_ERRORS = (
-    urllib.error.URLError,
-    http.client.IncompleteRead,
-    ConnectionError,
-    TimeoutError,
+    OSError,
+    http.client.HTTPException,
     json.JSONDecodeError,
 )
 
