@@ -288,10 +288,11 @@ class TestWalkCoverage(fixtures.DatabaseTest):
 
 
 class TestFlakinessVerdicts(fixtures.DatabaseTest):
-    def _ingest(self, extra_properties: dict, number: int = 1, force: bool = False) -> dict:
+    def _ingest(self, extra_properties: dict, number: int = 1, force: bool = False,
+               builder: str = fixtures.LAYOUT_BUILDER) -> dict:
         build = fixtures.build(number=number, extra_properties=extra_properties)
         outcome = ingest.ingest_build(
-            self.connection, fixtures.StubBuildbot(), fixtures.LAYOUT_BUILDER,
+            self.connection, fixtures.StubBuildbot(), builder,
             builder_id=7, build=build, force=force,
         )
         return {'outcome': outcome, 'build_id': build['buildid']}
@@ -359,6 +360,89 @@ class TestFlakinessVerdicts(fixtures.DatabaseTest):
         self.assertEqual(forced['outcome'], 'reingested')
         self.assertEqual([row['test_name'] for row in self.stored_verdicts(first['build_id'])],
                          ['fast/b.html'])
+
+    def test_a_reingest_keeps_the_escape_verdicts_it_cost_a_round_trip_to_decide(self) -> None:
+        first = self._ingest(fixtures.properties({
+            'results-db_first_run_flaky': json.dumps({'fast/a.html': config.CLEAN_TREE}),
+        }))
+        self._store_escape_verdict(first['build_id'], 'fast/a.html')
+        self._ingest({}, force=True)
+        self.assertEqual(self._stored_escape_verdicts(first['build_id']), ['fast/a.html'])
+
+    def test_a_reingest_updates_the_build_row(self) -> None:
+        first = self._ingest({})
+        self._ingest(fixtures.properties({'github.title': 'A retitled change'}), force=True)
+        stored = self.stored_build(first['build_id'])
+        self.assertEqual(stored['pr_title'], 'A retitled change')
+        self.assertEqual(
+            self.connection.execute('SELECT COUNT(*) FROM build_verdicts').fetchone()[0], 1)
+
+    def _store_escape_verdict(self, build_id: int, test_name: str) -> None:
+        with self.connection:
+            self.connection.execute(
+                '''INSERT INTO escape_verdicts (
+                    build_id, test_name, verdict, window_ends_at, decided_at
+                ) VALUES (?,?,?,?,?)''',
+                (build_id, test_name, 'ESCAPED', fixtures.DEFAULT_BUILD_TIME,
+                 fixtures.DEFAULT_BUILD_TIME),
+            )
+
+    def _stored_escape_verdicts(self, build_id: int) -> list:
+        return [row['test_name'] for row in self.connection.execute(
+            'SELECT test_name FROM escape_verdicts WHERE build_id = ? ORDER BY test_name',
+            (build_id,),
+        )]
+
+    def test_api_flaky_map_is_stored_at_the_rerun_slot(self) -> None:
+        """api-tests has one read, not two runs of its own; it happens at ReRunAPITests.doOnFailure,
+        the rerun still carrying the change, so it lands at run_number 2 -- the same slot layout's
+        own second run fills."""
+        ingested = self._ingest(fixtures.properties({
+            'results-db_api_flaky': json.dumps({
+                'TestWebKitAPI.DownloadProgress.ExtraData': config.BETWEEN_BUILDS,
+            }),
+        }), number=1, builder=fixtures.API_BUILDER)
+        self.assertEqual(
+            [(row['run_number'], row['test_name'], row['rule'])
+             for row in self.stored_verdicts(ingested['build_id'])],
+            [(2, 'TestWebKitAPI.DownloadProgress.ExtraData', config.BETWEEN_BUILDS)],
+        )
+
+    def test_api_flaky_unsupported_records_missing_within_build_evidence(self) -> None:
+        ingested = self._ingest(fixtures.properties({
+            'results-db_api_flaky': json.dumps({
+                'TestWebKitAPI.DownloadProgress.ExtraData': config.BETWEEN_BUILDS,
+                'TestWebKitAPI.ProcessSwap.NavigateBackAfterCrash': config.BETWEEN_BUILDS,
+            }),
+            'results-db_api_flaky_unsupported': json.dumps(
+                ['TestWebKitAPI.ProcessSwap.NavigateBackAfterCrash']),
+        }), number=1, builder=fixtures.API_BUILDER)
+        rows = {row['test_name']: row for row in self.stored_verdicts(ingested['build_id'])}
+        self.assertEqual(
+            rows['TestWebKitAPI.DownloadProgress.ExtraData']['within_build_evidence'], 1)
+        self.assertEqual(
+            rows['TestWebKitAPI.ProcessSwap.NavigateBackAfterCrash']['within_build_evidence'], 0)
+
+    def test_api_flaky_unknown_is_a_query_failure_not_a_conviction(self) -> None:
+        ingested = self._ingest(fixtures.properties({
+            'results-db_api_flaky': json.dumps({
+                'TestWebKitAPI.DownloadProgress.ExtraData': config.CLEAN_TREE,
+            }),
+            'results-db_api_flaky_unknown': json.dumps(
+                ['TestWebKitAPI.DownloadProgress.ExtraData', 'TestWebKitAPI.Gone.Test']),
+        }), number=1, builder=fixtures.API_BUILDER)
+        rows = {row['test_name']: row for row in self.stored_verdicts(ingested['build_id'])}
+        self.assertEqual(rows['TestWebKitAPI.DownloadProgress.ExtraData']['query_failed'], 0)
+        self.assertEqual(rows['TestWebKitAPI.Gone.Test']['query_failed'], 1)
+        self.assertIsNone(rows['TestWebKitAPI.Gone.Test']['rule'])
+
+    def test_api_flaky_alone_marks_the_query_as_having_run(self) -> None:
+        asked = self._ingest(
+            fixtures.properties({'results-db_api_flaky': json.dumps({})}), number=1,
+            builder=fixtures.API_BUILDER)
+        never_asked = self._ingest({}, number=2, builder=fixtures.API_BUILDER)
+        self.assertEqual(self.stored_build(asked['build_id'])['flakiness_query_ran'], 1)
+        self.assertEqual(self.stored_build(never_asked['build_id'])['flakiness_query_ran'], 0)
 
     def test_an_incomplete_build_is_skipped(self) -> None:
         build = fixtures.build(complete=False)

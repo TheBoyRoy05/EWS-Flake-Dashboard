@@ -34,6 +34,14 @@ RESULTS_FLAVORS = ('wk1', 'wk2', 'site-isolation')
 
 FLAKINESS_RUNS = ((1, 'first'), (2, 'second'))
 
+# api-tests has one flakiness read, not two runs of its own: AnalyzeAPITestsResults' classifier
+# check happens at ReRunAPITests.doOnFailure, which is the rerun still carrying the change -- the
+# same slot run_number 2 already means for layout's second run. The property carries no run prefix
+# at all (`results-db_api_flaky`, not `results-db_second_run_flaky`), so it is handled alongside
+# FLAKINESS_RUNS rather than folded into its key template.
+API_FLAKY_RUN_NUMBER = 2
+API_FLAKY_KEY = 'results-db_api_flaky'
+
 # An api-tests build whose properties carry no failure list costs three serial round trips against
 # Buildbot, which measured at 10s per 50 builds against 0.8s for a layout builder. Fetching a page's
 # worth of them together is where a refresh gets its time back.
@@ -290,30 +298,52 @@ def flakiness_query_ran(properties: dict) -> bool:
         f'results-db_{run}_run_flaky{suffix}' in properties
         for _, run in FLAKINESS_RUNS
         for suffix in ('', '_unsupported', '_unknown')
-    )
+    ) or any(f'{API_FLAKY_KEY}{suffix}' in properties for suffix in ('', '_unsupported', '_unknown'))
+
+
+def _verdicts_from_map(
+    properties: dict,
+    run_number: int,
+    flaky_key: str,
+    unsupported_key: str,
+    unknown_key: str,
+) -> list:
+    convictions = _map_property(properties, flaky_key) or {}
+    without_evidence = set(_list_property(properties, unsupported_key) or [])
+    query_failed = _list_property(properties, unknown_key) or []
+
+    verdicts = []
+    for test_name, rule in convictions.items():
+        evidence: Optional[bool] = None
+        if rule == config.BETWEEN_BUILDS:
+            evidence = test_name not in without_evidence
+        verdicts.append(FlakinessVerdict(run_number, test_name, rule, within_build_evidence=evidence))
+    for test_name in query_failed:
+        if test_name not in convictions:
+            verdicts.append(FlakinessVerdict(run_number, test_name, None, query_failed=True))
+    return verdicts
 
 
 def flakiness_verdicts(properties: dict) -> list:
-    """One verdict per test the classifier answered about, for each run that asked.
+    """One verdict per test the classifier answered about, for each run that asked, plus api-tests'
+    own single read.
 
-    Both runs are kept. The rerun's answer is the one the author saw, but a first run that
+    Both layout runs are kept. The rerun's answer is the one the author saw, but a first run that
     convicted a test the rerun did not is exactly the disagreement worth being able to see, and the
     prototype threw it away.
     """
     verdicts = []
     for run_number, run in FLAKINESS_RUNS:
-        convictions = _map_property(properties, f'results-db_{run}_run_flaky') or {}
-        without_evidence = set(_list_property(properties, f'results-db_{run}_run_flaky_unsupported') or [])
-        query_failed = _list_property(properties, f'results-db_{run}_run_flaky_unknown') or []
-
-        for test_name, rule in convictions.items():
-            evidence: Optional[bool] = None
-            if rule == config.BETWEEN_BUILDS:
-                evidence = test_name not in without_evidence
-            verdicts.append(FlakinessVerdict(run_number, test_name, rule, within_build_evidence=evidence))
-        for test_name in query_failed:
-            if test_name not in convictions:
-                verdicts.append(FlakinessVerdict(run_number, test_name, None, query_failed=True))
+        verdicts.extend(_verdicts_from_map(
+            properties, run_number,
+            f'results-db_{run}_run_flaky',
+            f'results-db_{run}_run_flaky_unsupported',
+            f'results-db_{run}_run_flaky_unknown',
+        ))
+    verdicts.extend(_verdicts_from_map(
+        properties, API_FLAKY_RUN_NUMBER,
+        API_FLAKY_KEY, f'{API_FLAKY_KEY}_unsupported', f'{API_FLAKY_KEY}_unknown',
+    ))
     return verdicts
 
 
@@ -326,9 +356,15 @@ def _store(
     build_id = columns['build_id']
     names = ', '.join(columns)
     placeholders = ', '.join('?' * len(columns))
+    # escape_verdicts, flakiness_verdicts and build_classifications all cascade from build_verdicts
+    # on delete, and a REPLACE is a delete: it would take an escape verdict costing a
+    # results.webkit.org round trip with it, which nothing here recomputes. Update in place instead,
+    # and let the two cheap tables be cleared deliberately below.
+    updates = ', '.join(f'{name} = excluded.{name}' for name in columns if name != 'build_id')
     with connection:
         connection.execute(
-            f'INSERT OR REPLACE INTO build_verdicts ({names}) VALUES ({placeholders})',
+            f'INSERT INTO build_verdicts ({names}) VALUES ({placeholders}) '
+            f'ON CONFLICT (build_id) DO UPDATE SET {updates}',
             tuple(columns.values()),
         )
         if replacing:
