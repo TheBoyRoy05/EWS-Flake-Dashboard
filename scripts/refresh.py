@@ -8,6 +8,11 @@ in parallel; the classify pass afterwards reads the cache and does no I/O of its
 
 Run it from cron or by hand. The web app never runs it, and a page served while it is halfway
 through shows the builds it has already finished plus a count of the ones it has not.
+
+The default window is the widest one a page offers, because a verdict exists only for what this
+script assessed while the convictions it could not be asked about are recounted per request over the
+whole window a reader picked: a narrower refresh than the widest choice makes the widest choice look
+worse than it is purely because nothing ever looked.
 """
 
 from __future__ import annotations
@@ -22,7 +27,9 @@ from typing import Optional
 from ews_dashboard import buildbot, config, db, ingest, landings, results, webkit_checkout
 from ews_dashboard.analysis import escapes, false_positive, trend
 
-DEFAULT_DAYS = 14
+# The widest of the web app's WINDOW_CHOICES, so a default refresh assesses everything a page can be
+# asked to show.
+DEFAULT_DAYS = 90
 
 
 def _window(days: int) -> tuple:
@@ -48,25 +55,30 @@ def _finish_run(connection: sqlite3.Connection, started_at: int, report: ingest.
         )
 
 
-def _fail_run(connection: sqlite3.Connection, started_at: int, error: BaseException) -> None:
+def _fail_run(connection: sqlite3.Connection, started_at: int, error: BaseException,
+              report: ingest.IngestReport) -> None:
     """Record why a run died, so the pages can say the numbers stopped moving on purpose.
 
     `finished_at` stays null: a failed run did not finish, and every freshness answer treats it as
-    the stale run it is.
+    the stale run it is. `builds_ingested` and `builds_failed` still record whatever `report`
+    accumulated before the error, so a run that died halfway reports what it did manage to store and
+    fail rather than nothing.
     """
     with connection:
-        connection.execute('UPDATE refresh_runs SET error = ? WHERE started_at = ?',
-                           (f'{type(error).__name__}: {error}', started_at))
+        connection.execute(
+            'UPDATE refresh_runs SET error = ?, builds_ingested = ?, builds_failed = ? WHERE started_at = ?',
+            (f'{type(error).__name__}: {error}',
+             report.outcomes['ingested'] + report.outcomes['reingested'], report.failed, started_at),
+        )
 
 
 def ingest_builds(connection: sqlite3.Connection, client: buildbot.BuildbotClient, since: int,
-                  builder: Optional[str], force: bool) -> tuple:
+                  builder: Optional[str], force: bool, report: ingest.IngestReport) -> int:
     names = [builder] if builder else ingest.dashboard_builder_names(client)
-    report = ingest.IngestReport()
     for name in names:
         print(f'  {name}', flush=True)
         report.add(ingest.ingest_builder(connection, client, name, since=since, force=force))
-    return report, len(names)
+    return len(names)
 
 
 def classify_builds(connection: sqlite3.Connection, history: results.History,
@@ -116,10 +128,11 @@ def main() -> int:
     connection = db.connect()
     started_at = int(time.time())
     _begin_run(connection, started_at)
+    report = ingest.IngestReport()
     try:
-        report, builders_walked = _refresh(connection, parsed, since, until)
-    except Exception as error:
-        _fail_run(connection, started_at, error)
+        builders_walked = _refresh(connection, parsed, since, until, report)
+    except BaseException as error:
+        _fail_run(connection, started_at, error, report)
         connection.close()
         print(f'refresh failed: {type(error).__name__}: {error}', file=sys.stderr)
         raise
@@ -129,13 +142,13 @@ def main() -> int:
 
 
 def _refresh(connection: sqlite3.Connection, parsed: argparse.Namespace,
-             since: int, until: int) -> tuple:
-    report, builders_walked = ingest.IngestReport(), 0
+             since: int, until: int, report: ingest.IngestReport) -> int:
+    builders_walked = 0
     if not parsed.skip_ingest:
         walked_from = datetime.datetime.fromtimestamp(since, datetime.timezone.utc).date()
         print(f'Ingesting builds since {walked_from.isoformat()}')
-        report, builders_walked = ingest_builds(
-            connection, buildbot.BuildbotClient(), since, parsed.builder, parsed.force,
+        builders_walked = ingest_builds(
+            connection, buildbot.BuildbotClient(), since, parsed.builder, parsed.force, report,
         )
         for error in report.errors[:10]:
             print(f'  {error}', file=sys.stderr)
@@ -155,7 +168,7 @@ def _refresh(connection: sqlite3.Connection, parsed: argparse.Namespace,
         check_escapes(connection, history, since, until, checkout_path)
 
     print(f'  results.webkit.org: {dict(history.stats)}')
-    return report, builders_walked
+    return builders_walked
 
 
 if __name__ == '__main__':
