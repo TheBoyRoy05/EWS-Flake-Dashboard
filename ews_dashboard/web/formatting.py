@@ -41,6 +41,10 @@ VERDICT_WORDS = {
     false_positive.UNQUERIED: 'not looked up',
 }
 
+# Every verdict a build's own pane can show a test in, in the order it reads best as a list of
+# choices: real, noise, no history, not looked up.
+VERDICT_CHOICES = tuple(VERDICT_WORDS)
+
 # A bucket or verdict that reads as blame noise, which is the state this dashboard exists to surface.
 BLAMES_NOISE = frozenset((false_positive.PARTIAL_FP, false_positive.FALSE_RED,
                           false_positive.PRE_EXISTING))
@@ -48,6 +52,15 @@ BLAMES_NOISE = frozenset((false_positive.PARTIAL_FP, false_positive.FALSE_RED,
 # Every state the builds pane can show a build in, in the order it reads best as a list of choices.
 STATE_CHOICES = (false_positive.CLEAN, false_positive.PARTIAL_FP, false_positive.FALSE_RED,
                  false_positive.UNDETERMINED, NO_SURFACED, UNCLASSIFIED)
+
+# What the failing-builds pane opens to before a reader asks for anything else: the two states
+# BUCKET_WORDS reads as 'partly noise' and 'all noise', which is the noise this dashboard exists to
+# surface, rather than every build in the window.
+DEFAULT_STATES = (false_positive.PARTIAL_FP, false_positive.FALSE_RED)
+
+# The query value that widens the pane back to every state. Not one of STATE_CHOICES, so a checkbox
+# built from that tuple can never render it as one of the choices.
+ANY_STATE = 'all'
 
 
 def state(name: Optional[str]) -> str:
@@ -82,6 +95,20 @@ def moment(value: Optional[int]) -> str:
     return at.strftime('%Y-%m-%d %H:%M UTC')
 
 
+def day(value: Optional[int]) -> str:
+    if value is None:
+        return MISSING
+    at = datetime.datetime.fromtimestamp(value, datetime.timezone.utc)
+    return at.strftime('%Y-%m-%d')
+
+
+def clock(value: Optional[int]) -> str:
+    if value is None:
+        return ''
+    at = datetime.datetime.fromtimestamp(value, datetime.timezone.utc)
+    return at.strftime('%H:%M UTC')
+
+
 def age(seconds: Optional[int]) -> str:
     if seconds is None:
         return 'never'
@@ -105,7 +132,9 @@ def duration(seconds: Optional[int]) -> str:
 
 
 def register(app: Flask) -> None:
-    for name, function in (('percent', percent), ('count', count), ('moment', moment), ('age', age),
-                           ('duration', duration), ('state', state), ('state_class', state_class)):
+    for name, function in (('percent', percent), ('count', count), ('moment', moment), ('day', day),
+                           ('clock', clock), ('age', age), ('duration', duration), ('state', state),
+                           ('state_class', state_class)):
         app.jinja_env.filters[name] = function
     app.jinja_env.globals['blames_noise'] = BLAMES_NOISE
+    app.jinja_env.globals['any_state'] = ANY_STATE

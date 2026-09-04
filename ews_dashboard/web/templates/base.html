@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>{% block title %}EWS flake detection{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+  <script defer src="{{ url_for('static', filename='dashboard.js') }}"></script>
 </head>
 <body>
   <div class="header">
@@ -13,10 +14,9 @@
     <div class="actions">
       <div class="list">
         <div class="item"><a href="{{ url_for('landing', days=window.days) }}">Overview</a></div>
+        <div class="item"><a href="{{ url_for('tests', days=window.days) }}">Tests</a></div>
         <div class="item"><a href="{{ url_for('explore', days=window.days) }}">Explore</a></div>
         <div class="item"><a href="{{ url_for('escaped_regressions', days=window.days) }}">Escapes</a></div>
-        <div class="item"><a href="https://results.webkit.org">ResultsDB</a></div>
-        <div class="item"><a href="https://ews-build.webkit.org">EWS</a></div>
       </div>
     </div>
   </div>

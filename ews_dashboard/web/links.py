@@ -16,31 +16,23 @@ WEBKIT_PULL_REQUEST_URL = 'https://github.com/WebKit/WebKit/pull'
 
 
 def _test_parameters(configuration: results.Configuration, test_name: str) -> dict:
-    parameters = {
-        'suite': configuration.suite,
-        'test': test_name,
-        'platform': configuration.platform,
-        'style': configuration.style,
-    }
-    if configuration.flavor:
-        parameters['flavor'] = configuration.flavor
-    return parameters
+    return {'suite': configuration.suite, 'test': test_name}
 
 
 def test_history(configuration: results.Configuration, test_name: str) -> str:
     """Where a test started flaking, on results.webkit.org's own timeline.
 
-    This is the shape investigate.html builds for the same purpose, so it stays correct as that
-    page evolves; the configuration comes out of the query string there too.
+    `test_investigation` builds the same `RESULTS_URL` query, just unfiltered by configuration.
     """
-    query = urllib.parse.urlencode(_test_parameters(configuration, test_name))
-    return f'{config.RESULTS_URL}/?{query}'
+    parameters = _test_parameters(configuration, test_name)
+    parameters.update(configuration.query_parameters())
+    return f'{config.RESULTS_URL}/?{urllib.parse.urlencode(parameters)}'
 
 
 def test_investigation(configuration: results.Configuration, test_name: str) -> str:
-    """The same test across every configuration, for deciding whether a flake is platform-specific."""
+    """The same timeline unfiltered by configuration, so every configuration of the test shows."""
     query = urllib.parse.urlencode(_test_parameters(configuration, test_name))
-    return f'{config.RESULTS_URL}/investigate?{query}'
+    return f'{config.RESULTS_URL}/?{query}'
 
 
 def build(builder_id: int, build_number: int) -> str:

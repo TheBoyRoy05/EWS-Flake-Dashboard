@@ -1,18 +1,25 @@
 {% extends 'base.html' %}
-{% from 'parts.html' import window_chooser, suite_chooser, queue_pane, rolling_chooser, staleness, rate %}
+{% from 'parts.html' import window_chooser, suite_chooser, queue_dropdown, rolling_chooser, staleness, rate %}
 
 {% block content %}
+{% set filter_args = {'group': group, 'version': version, 'builder': builder} %}
+{% macro held_fields() %}
+<input type="hidden" name="days" value="{{ window.days }}">
+{%- if suite %}<input type="hidden" name="suite" value="{{ suite }}">{% endif %}
+{%- if rolling %}<input type="hidden" name="rolling" value="{{ rolling }}">{% endif %}
+{%- endmacro %}
 {{ staleness(freshness, freshness_dismissed) }}
 
 <div class="row headline">
   <div class="col-4">
     <span class="text large">Flake or Fault?</span>
-    <span class="text tiny">{% if builder and suite %}{{ builder }}, {{ suite }}{% else %}{{ builder or suite or 'all queues' }}{% endif %}, last {{ window.days }} days</span>
+    <span class="text tiny">{% if suite %}{{ suite }}, {% endif %}{{ queue_summary }}, last {{ window.days }} days</span>
   </div>
   <div class="col-8">
     <div class="chooser groups">
-      {{ suite_chooser('landing', window, suite_choices, suite, builder=builder, rolling=rolling) }}
-      {{ window_chooser('landing', window, window_choices, suite=suite, builder=builder, rolling=rolling) }}
+      {{ queue_dropdown('landing', queue_tree, group, version, builder, queue_summary, held_fields()) }}
+      {{ suite_chooser('landing', window, suite_choices, suite, rolling=rolling, filter_args=filter_args) }}
+      {{ window_chooser('landing', window, window_choices, suite=suite, rolling=rolling, filter_args=filter_args) }}
     </div>
   </div>
 </div>
@@ -37,14 +44,10 @@
   </div>
 </div>
 
-<div class="scope banded">
-{{ queue_pane('landing', window, queue_activity, suite, builder, rolling=rolling) }}
-
-<div class="scoped">
 <div class="section chart">
   <div class="header">
     <div class="title">Blame noise over {{ window.days }} days</div>
-    {{ rolling_chooser('landing', window, rolling_choices, rolling, suite=suite, builder=builder) }}
+    {{ rolling_chooser('landing', window, rolling_choices, rolling, suite=suite, filter_args=filter_args) }}
   </div>
   <div class="content">
     {% if chart.empty %}
@@ -80,19 +83,17 @@
     {% endif %}
   </div>
 </div>
-</div>
-</div>
 
 <div class="section">
   <div class="header"><div class="title">What the classifier convicted, last {{ window.days }} days</div></div>
   <div class="content">
     <table class="table full-width">
-      <thead><tr><th>Rule</th><th>Convictions</th><th>Meaning</th></tr></thead>
+      <thead><tr><th>Rule</th><th class="numeric">Convictions</th><th>Meaning</th></tr></thead>
       <tbody>
         {% for rule, total in by_rule.items() %}
         <tr>
-          <td><a href="{{ url_for('explore', days=window.days, suite=suite, builder=builder) }}#{{ rule }}">{{ rule }}</a></td>
-          <td>{{ total | count }}</td>
+          <td><a href="{{ url_for('tests', days=window.days, suite=suite, **dict(filter_args, **{filter_argument: 'rule:anyof:' ~ rule})) }}">{{ rule }}</a></td>
+          <td class="numeric">{{ total | count }}</td>
           <td class="text tiny">{{ rule_descriptions[rule] }}</td>
         </tr>
         {% endfor %}

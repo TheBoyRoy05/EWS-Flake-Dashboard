@@ -25,6 +25,10 @@ BUSY_TIMEOUT_MILLISECONDS = 30000
 MIGRATIONS: tuple[str, ...] = (
     'ALTER TABLE refresh_runs ADD COLUMN error TEXT',
     'ALTER TABLE build_verdicts ADD COLUMN pr_title TEXT',
+    'ALTER TABLE escape_verdicts ADD COLUMN recent_runs INTEGER',
+    'ALTER TABLE escape_verdicts ADD COLUMN recent_failed INTEGER',
+    'ALTER TABLE escape_verdicts ADD COLUMN recent_checked_at INTEGER',
+    'ALTER TABLE escape_verdicts ADD COLUMN landed_at INTEGER',
 )
 
 REPORTED_TABLES = (
@@ -52,9 +56,18 @@ def connect(path: Optional[str] = None) -> sqlite3.Connection:
 def _apply_migrations(connection: sqlite3.Connection) -> int:
     applied = connection.execute('SELECT COUNT(*) FROM schema_migrations').fetchone()[0]
     for index, statement in enumerate(MIGRATIONS[applied:], start=applied):
-        with connection:
-            connection.execute(statement)
-            _record_migration(connection, index)
+        try:
+            with connection:
+                connection.execute(statement)
+                _record_migration(connection, index)
+        except sqlite3.OperationalError as error:
+            # A standalone scripts/migrate_*.py may have already added this column on this
+            # database; that leaves MIGRATIONS's own ADD COLUMN redundant, not wrong, so record
+            # it as applied rather than aborting the rest of the list.
+            if 'duplicate column name' not in str(error):
+                raise
+            with connection:
+                _record_migration(connection, index)
     return len(MIGRATIONS) - applied
 
 

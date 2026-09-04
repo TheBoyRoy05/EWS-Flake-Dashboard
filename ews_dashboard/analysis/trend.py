@@ -49,7 +49,7 @@ def daily(
     days: int = 30,
     rolling: int = ROLLING_DAYS,
     suite: Optional[str] = None,
-    builder: Optional[str] = None,
+    builders: tuple = (),
 ) -> list:
     """One Point per day, oldest first.
 
@@ -61,7 +61,7 @@ def daily(
     for day in walked:
         since, until = day_bounds(day)
         per_day.append(false_positive.rate(connection, classifier, since, until,
-                                           suite=suite, builder=builder))
+                                           suite=suite, builders=builders))
 
     points = []
     for index in range(rolling - 1, len(walked)):

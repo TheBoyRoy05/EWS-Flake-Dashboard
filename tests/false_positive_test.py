@@ -8,6 +8,7 @@ from unittest import mock
 
 from ews_dashboard import config, results
 from ews_dashboard.analysis import false_positive
+from ews_dashboard.web import formatting
 from tests import fixtures
 
 WINDOW = (fixtures.DEFAULT_BUILD_TIME - 86400, fixtures.DEFAULT_BUILD_TIME + 86400)
@@ -192,7 +193,7 @@ class TestRate(fixtures.DatabaseTest):
         self.assertEqual(self._rate(suite='api-tests').false_red, 0)
 
     def test_a_builder_filter_narrows_the_rate(self) -> None:
-        counts = self._rate(builder=fixtures.LAYOUT_BUILDER)
+        counts = self._rate(builders=(fixtures.LAYOUT_BUILDER,))
         self.assertEqual((counts.false_red, counts.clean), (1, 0))
 
     def test_builds_outside_the_window_are_not_scored(self) -> None:
@@ -282,6 +283,14 @@ class TestUndeterminedReason(fixtures.DatabaseTest):
     def test_an_ordinary_build_has_no_reason_its_history_cannot_be_believed(self) -> None:
         build_id = self.store_build(1, first=['fast/a.html'], second=['fast/a.html'], clean=[])
         self.assertIsNone(self._reason(build_id))
+
+
+class TestBucketDescriptions(fixtures.DatabaseTest):
+    """The gloss the legend reads for every state the builds pane can show a build in."""
+
+    def test_every_state_choice_has_a_description(self) -> None:
+        for choice in formatting.STATE_CHOICES:
+            self.assertIn(choice, false_positive.BUCKET_DESCRIPTIONS, choice)
 
 
 class TestExplain(fixtures.DatabaseTest):

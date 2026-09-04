@@ -215,22 +215,46 @@ CREATE TABLE IF NOT EXISTS test_runs_cache (
 --
 -- Invalidation: `window_ends_at` is when the watched window closes, so a row decided before that
 -- window had settled is decided again. One decided after it holds.
+--
+-- `landed_at` and `window_ends_at` are two different facts and both are stored: when the commit
+-- landed, and the end of the window these counts were taken over. The gap between them is
+-- ESCAPE_WINDOW_DAYS, which is configuration, so deriving either from the other would move the
+-- landing time of every already-stored row the day that setting changes — a page would print a date
+-- that never happened beside counts taken over the window that was really counted. `landed_at` is
+-- nullable only so it can be added to a live table by ALTER TABLE; every write path fills it, and a
+-- row left NULL is one `scripts/migrate_verdict_landed_at.py` found no landing for, which the page
+-- says rather than guesses.
+--
+-- How strongly a test escaped is not stored: it is read off `runs_after` and `failed_after` by
+-- `escapes.rarity_for_counts`, so it cannot disagree with the counts a page prints beside it.
+--
+-- The `recent_` columns are a separate question — is main failing this test now — answered over a
+-- fresh window ending at `recent_checked_at`, and only ever for an ESCAPED row. All three are NULL
+-- together until the first check, because a row nothing has asked about is not a row main has
+-- recovered on, and storing a boolean instead would have made the two indistinguishable. For the
+-- same reason `recent_runs = 0` is kept rather than collapsed: main running the test no times in the
+-- window is not a recovery either, and only the count can tell the two apart.
 CREATE TABLE IF NOT EXISTS escape_verdicts (
-    build_id        INTEGER NOT NULL REFERENCES build_verdicts(build_id) ON DELETE CASCADE,
-    test_name       TEXT    NOT NULL,
+    build_id          INTEGER NOT NULL REFERENCES build_verdicts(build_id) ON DELETE CASCADE,
+    test_name         TEXT    NOT NULL,
 
-    verdict         TEXT    NOT NULL CHECK (verdict IN (
-                        'ESCAPED', 'FAILS_ON_MAIN', 'CONTAINED',
-                        'NO_RUNS', 'NO_BASELINE', 'TREE_DIVERGED'
-                    )),
+    verdict           TEXT    NOT NULL CHECK (verdict IN (
+                          'ESCAPED', 'FAILS_ON_MAIN', 'CONTAINED',
+                          'NO_RUNS', 'NO_BASELINE', 'TREE_DIVERGED'
+                      )),
 
-    runs_before     INTEGER NOT NULL DEFAULT 0,
-    failed_before   INTEGER NOT NULL DEFAULT 0,
-    runs_after      INTEGER NOT NULL DEFAULT 0,
-    failed_after    INTEGER NOT NULL DEFAULT 0,
+    runs_before       INTEGER NOT NULL DEFAULT 0,
+    failed_before     INTEGER NOT NULL DEFAULT 0,
+    runs_after        INTEGER NOT NULL DEFAULT 0,
+    failed_after      INTEGER NOT NULL DEFAULT 0,
 
-    window_ends_at  INTEGER NOT NULL,
-    decided_at      INTEGER NOT NULL,
+    recent_runs       INTEGER,
+    recent_failed     INTEGER,
+    recent_checked_at INTEGER,
+
+    landed_at         INTEGER,
+    window_ends_at    INTEGER NOT NULL,
+    decided_at        INTEGER NOT NULL,
 
     PRIMARY KEY (build_id, test_name)
 );

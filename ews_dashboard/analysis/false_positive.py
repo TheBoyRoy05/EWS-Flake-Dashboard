@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, Optional
 
-from ews_dashboard import config, results
+from ews_dashboard import config, queues, results
 
 # A build classified while its tests had no recorded history may be classifiable now, so those rows
 # expire. A build that classified every test keeps its answer forever.
@@ -48,10 +48,28 @@ NO_HISTORY = 'no_history'
 UNQUERIED = 'unqueried'
 
 VERDICT_DESCRIPTIONS = {
-    REAL: 'main passes this reliably, so the change is the likely cause',
-    PRE_EXISTING: 'main already fails this, so the author was blamed for noise',
-    NO_HISTORY: 'nothing is recorded for this test in this configuration',
-    UNQUERIED: 'nobody has looked this one up',
+    REAL: f'Main passed this test more than {config.PRE_EXISTING_THRESHOLD_PCT}% of the time at the '
+         'commit the change was rebased onto, so the change is the likely cause.',
+    PRE_EXISTING: f'Main passed this test {config.PRE_EXISTING_THRESHOLD_PCT}% of the time or less '
+                  'at the commit the change was rebased onto, so the author was blamed for noise.',
+    NO_HISTORY: 'results.webkit.org has no runs recorded for this test in this configuration, so '
+               'there is no pass rate to compare against the threshold.',
+    UNQUERIED: 'Nobody has looked this one up.',
+}
+
+# The two states below are not stored buckets — `formatting.NO_SURFACED` and `formatting.UNCLASSIFIED`
+# — but a reader sees them wherever a bucket appears, so they need the same gloss. Spelled out as
+# literals rather than imported, since `formatting` imports this module and not the other way round.
+BUCKET_DESCRIPTIONS = {
+    CLEAN: 'Every author-visible failure is real, so none of them is noise.',
+    PARTIAL_FP: 'The author-visible failures are a mix of real and pre-existing, so the build '
+               'blamed some noise alongside a real failure.',
+    FALSE_RED: 'Every author-visible failure is pre-existing, so the whole build blamed noise.',
+    UNDETERMINED: 'The build surfaced failures but none of them could be classified against main, '
+                 'whether for missing history or because the build itself cannot be trusted.',
+    'no_surfaced': 'The build showed its author no failures at all, so it has no bucket and no '
+                   'bearing on the rate.',
+    'unclassified': 'No refresh has reached this build yet, so nothing has been classified.',
 }
 
 TRUNCATED_LISTS = 'truncated_lists'
@@ -63,8 +81,9 @@ REASON_DESCRIPTIONS = {
                      'arbitrary point',
     NO_BASE_COMMIT: 'the build recorded no base identifier, so any lookup would answer about the '
                     'tip of the tree instead',
-    TOO_MANY_SURFACED: 'more tests were surfaced than a change plausibly breaks, which is a broken '
-                       'checkout or a crash storm rather than a change under test',
+    TOO_MANY_SURFACED: f'more than {config.MAX_CLASSIFIABLE_SURFACED_TESTS} tests were surfaced, '
+                      'more than a change plausibly breaks, which is a broken checkout or a crash '
+                      'storm rather than a change under test',
 }
 
 
@@ -382,18 +401,20 @@ BUILD_COLUMNS = '''build_id, builder, builder_id, build_number, pr_id, sha, chan
                    first_run_failures, second_run_failures, clean_tree_run_failures, started_at'''
 
 
-def _failing_where(since: int, until: int, suite: Optional[str], builder: Optional[str]) -> tuple:
-    """The WHERE clause every failing-build query shares, and its arguments, returned together so a
+def _failing_where(since: int, until: int, suite: Optional[str],
+                   builders: tuple = ()) -> tuple:
+    """The WHERE clause every failing-build query shares, and its parameters, returned together so a
     caller cannot bind one without the other."""
-    conditions = ["verdict = 'FAILURE'", 'started_at >= ?', 'started_at < ?']
-    arguments = [since, until]
+    conditions = ["verdict = 'FAILURE'", 'started_at >= :since', 'started_at < :until']
+    parameters = {'since': since, 'until': until}
     if suite is not None:
-        conditions.append('suite = ?')
-        arguments.append(suite)
-    if builder is not None:
-        conditions.append('builder = ?')
-        arguments.append(builder)
-    return ' AND '.join(conditions), arguments
+        conditions.append('suite = :suite')
+        parameters['suite'] = suite
+    fragment, builder_parameters = queues.builder_filter(builders, column='builder')
+    if fragment:
+        conditions.append(fragment)
+        parameters.update(builder_parameters)
+    return ' AND '.join(conditions), parameters
 
 
 def failing_builds(
@@ -401,22 +422,22 @@ def failing_builds(
     since: int,
     until: int,
     suite: Optional[str] = None,
-    builder: Optional[str] = None,
+    builders: tuple = (),
     limit: Optional[int] = None,
 ) -> list:
     """Failing builds, newest first. Unlimited by default because the refresh classifies all of
     them; a page passes a limit and reports the rest with `failing_build_count`."""
-    where, arguments = _failing_where(since, until, suite, builder)
+    where, parameters = _failing_where(since, until, suite, builders)
     clause = ''
     if limit is not None:
-        clause = ' LIMIT ?'
-        arguments.append(limit)
+        clause = ' LIMIT :limit'
+        parameters['limit'] = limit
     return connection.execute(
         f'''SELECT {BUILD_COLUMNS}
             FROM build_verdicts
             WHERE {where}
-            ORDER BY started_at DESC{clause}''',
-        arguments,
+            ORDER BY started_at DESC, build_id DESC{clause}''',
+        parameters,
     ).fetchall()
 
 
@@ -425,11 +446,11 @@ def failing_build_count(
     since: int,
     until: int,
     suite: Optional[str] = None,
-    builder: Optional[str] = None,
+    builders: tuple = (),
 ) -> int:
-    where, arguments = _failing_where(since, until, suite, builder)
+    where, parameters = _failing_where(since, until, suite, builders)
     return connection.execute(
-        f'SELECT COUNT(*) FROM build_verdicts WHERE {where}', arguments,
+        f'SELECT COUNT(*) FROM build_verdicts WHERE {where}', parameters,
     ).fetchone()[0]
 
 
@@ -490,9 +511,9 @@ def rate(
     since: int,
     until: int,
     suite: Optional[str] = None,
-    builder: Optional[str] = None,
+    builders: tuple = (),
 ) -> Counts:
     counts = Counts()
-    for build_row in failing_builds(connection, since, until, suite=suite, builder=builder):
+    for build_row in failing_builds(connection, since, until, suite=suite, builders=builders):
         counts.record(classifier(build_row))
     return counts

@@ -27,10 +27,20 @@ PRE_EXISTING_THRESHOLD_PCT = 80
 # test convicted for flaking over three days is checked over the same span.
 ESCAPE_WINDOW_DAYS = 3
 
-# What share of a test's post-landing runs on main must fail unexpectedly before the failure is a
-# regression rather than the flakiness the build was told it was. Below this the conviction is
-# corroborated: the test really does fail some of the time on main.
+# What share of a test's post-landing runs on main must fail unexpectedly for an escape to count as a
+# strong one. Whether anything escaped is decided by the baseline instead — main never failed the
+# test before the landing — and below this share the escape stands on fewer failures.
 ESCAPE_FAILURE_PCT = 50
+
+# How far back from the moment of the check main is asked whether it is still failing an escaped
+# test. A fresh window ending now, not the window either side of the landing: whether the regression
+# is still there is a different question from how the conviction was graded, and no window fixed to
+# the landing can answer it however wide it is.
+CURRENCY_DAYS = 7
+
+# How long that answer stands before the escape is asked about again. Only the escapes are ever
+# asked, so this costs a query per escape per day rather than one per conviction.
+CURRENCY_TTL_SECONDS = 24 * 3600
 
 # Above this many author-visible failures the build is a crash storm, not a set of test results;
 # classifying it test-by-test would cost hundreds of lookups to describe a broken checkout.
@@ -43,12 +53,15 @@ BETWEEN_BUILDS = 'BetweenBuilds'
 # Display order, not alphabetical: CleanTree is the only rule that convicts on a single row.
 FLAKINESS_RULES = (CLEAN_TREE, DIRTY_TREE, BETWEEN_BUILDS)
 
-# Thresholds are ResultsDatabase's in results_db.py: DirtyTree wants 2 pull requests and 1 author.
+# Thresholds are ResultsDatabase's in results_db.py: DirtyTree wants 2 pull requests and 2 authors.
 # BetweenBuilds wants 3 pull requests and 2 authors. Both windows are FLAKY_WINDOW_SECONDS, 3 days.
 RULE_DESCRIPTIONS = {
-    CLEAN_TREE: 'Recorded flaky with no change applied, so the change cannot be the cause.',
-    DIRTY_TREE: 'Recorded flaky with a change applied, in 2 or more pull requests in 3 days.',
-    BETWEEN_BUILDS: 'Recorded failing across 3 or more pull requests and 2 authors in 3 days.',
+    CLEAN_TREE: 'Recorded flaky with the change reverted, so the change cannot be the cause. One '
+               'such row convicts: this rule has no pull request or author threshold.',
+    DIRTY_TREE: 'Recorded flaky with a change applied, by at least 2 pull requests and at least 2 '
+               'authors within 3 days.',
+    BETWEEN_BUILDS: 'Recorded failing across at least 3 pull requests and at least 2 authors '
+                    'within 3 days.',
 }
 
 

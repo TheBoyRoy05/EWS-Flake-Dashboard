@@ -12,7 +12,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Optional
 
-from ews_dashboard import config, results
+from ews_dashboard import config, queues, results
+from ews_dashboard.analysis import filters
 
 WINDOW = 'build.started_at >= :since AND build.started_at < :until'
 
@@ -20,7 +21,7 @@ WINDOW = 'build.started_at >= :since AND build.started_at < :until'
 @dataclass(frozen=True)
 class ConvictedTest:
     test_name: str
-    rule: str
+    rules: tuple
     convictions: int
     queues: int
     last_seen: int
@@ -32,16 +33,53 @@ class ConvictedTest:
 
 
 @dataclass(frozen=True)
+class TestConviction:
+    """One conviction of a single test, for that test's own drilldown."""
+
+    rule: str
+    builder: str
+    builder_id: int
+    build_number: int
+    pr_id: Optional[int]
+    started_at: int
+    configuration: results.Configuration
+
+
+@dataclass(frozen=True)
 class Convictions:
-    """One rule's convicted tests, and how many the query would have returned unlimited, so a page
-    can say what it cut rather than presenting a truncated list as the whole of it."""
+    """One capped set of a rule's convicted tests, and whether it is the whole of them, so a response
+    describes what it just sent rather than presenting a cut set as the whole of it.
+
+    `total` is the count of every row the query matched whether or not the cap kept it, so
+    `truncated` can tell a reader the set was cut without the caller having to compare it itself.
+    """
 
     tests: list
     total: int
+    limit: int
 
     @property
-    def truncated(self) -> int:
-        return max(0, self.total - len(self.tests))
+    def truncated(self) -> bool:
+        return self.total > len(self.tests)
+
+
+@dataclass(frozen=True)
+class TestConvictions:
+    """One capped set of a single test's own convictions, and whether it is the whole of them, so
+    the drilldown can say when a cap cut its list the same way `Convictions` already does for the
+    convicted-tests table.
+
+    `total` is the count of every conviction the query matched whether or not the cap kept it, so
+    `truncated` can tell a reader the set was cut without the caller having to compare it itself.
+    """
+
+    convictions: tuple
+    total: int
+    limit: int
+
+    @property
+    def truncated(self) -> bool:
+        return self.total > len(self.convictions)
 
 
 @dataclass(frozen=True)
@@ -52,30 +90,30 @@ class QueueActivity:
     query_failures: int
 
 
-def _filters(suite: Optional[str], builder: Optional[str] = None) -> tuple:
+def _filters(suite: Optional[str], builders: tuple = ()) -> tuple:
     """Extra WHERE clauses for a query that has build_verdicts aliased as `build`, and their
     parameters. Returned together so a caller cannot bind one without the other."""
     conditions, parameters = '', {}
     if suite is not None:
         conditions += ' AND build.suite = :suite'
         parameters['suite'] = suite
-    if builder is not None:
-        conditions += ' AND build.builder = :builder'
-        parameters['builder'] = builder
+    fragment, builder_parameters = queues.builder_filter(builders)
+    if fragment:
+        conditions += f' AND {fragment}'
+        parameters.update(builder_parameters)
     return conditions, parameters
 
 
-def _window_parameters(since: int, until: int, suite: Optional[str],
-                       builder: Optional[str]) -> tuple:
-    conditions, parameters = _filters(suite, builder)
+def _window_parameters(since: int, until: int, suite: Optional[str], builders: tuple = ()) -> tuple:
+    conditions, parameters = _filters(suite, builders)
     parameters.update({'since': since, 'until': until})
     return conditions, parameters
 
 
 def by_rule(connection: sqlite3.Connection, since: int, until: int, suite: Optional[str] = None,
-            builder: Optional[str] = None) -> dict:
+            builders: tuple = ()) -> dict:
     """Convictions per rule, including rules that never fired, so a zero shows up as a zero."""
-    conditions, parameters = _window_parameters(since, until, suite, builder)
+    conditions, parameters = _window_parameters(since, until, suite, builders)
     counted = {
         row['rule']: row['convictions']
         for row in connection.execute(
@@ -91,8 +129,8 @@ def by_rule(connection: sqlite3.Connection, since: int, until: int, suite: Optio
 
 
 def builds_queried(connection: sqlite3.Connection, since: int, until: int,
-                   suite: Optional[str] = None, builder: Optional[str] = None) -> int:
-    conditions, parameters = _window_parameters(since, until, suite, builder)
+                   suite: Optional[str] = None, builders: tuple = ()) -> int:
+    conditions, parameters = _window_parameters(since, until, suite, builders)
     return connection.execute(
         f'''SELECT COUNT(*) FROM build_verdicts AS build
             WHERE build.flakiness_query_ran = 1 AND {WINDOW}{conditions}''',
@@ -101,9 +139,9 @@ def builds_queried(connection: sqlite3.Connection, since: int, until: int,
 
 
 def query_failures(connection: sqlite3.Connection, since: int, until: int,
-                   suite: Optional[str] = None, builder: Optional[str] = None) -> int:
+                   suite: Optional[str] = None, builders: tuple = ()) -> int:
     """Tests the classifier asked about and got no answer for — the read path's own error rate."""
-    conditions, parameters = _window_parameters(since, until, suite, builder)
+    conditions, parameters = _window_parameters(since, until, suite, builders)
     return connection.execute(
         f'''SELECT COUNT(*)
             FROM latest_flakiness_verdicts AS verdict
@@ -115,40 +153,54 @@ def query_failures(connection: sqlite3.Connection, since: int, until: int,
 
 def convicted_tests(
     connection: sqlite3.Connection,
-    rule: str,
     since: int,
     until: int,
     suite: Optional[str] = None,
-    builder: Optional[str] = None,
-    limit: int = 100,
+    builders: tuple = (),
+    limit: int = 1000,
+    conditions: tuple = (),
+    sort_keys: tuple = (),
 ) -> 'Convictions':
-    """Tests convicted under one rule, most-convicted first, each with a build to link to.
+    """The tests convicted, one row per test, in the order asked for, each with a build to link to,
+    capped at `limit` rows so the query's cost has a ceiling whatever day-window or filter a reader
+    picks.
+
+    `conditions` and `sort_keys` come from `filters`, which owns every column name, operator and
+    expression a request can reach: nothing a reader typed is spelled into this SQL, only bound
+    to it.
 
     The builder, build number and configuration columns are bare in an aggregate query alongside
     MAX(started_at), which sqlite documents as taking their values from the row that produced the
     maximum — so they describe the most recent conviction rather than an arbitrary one.
     """
-    conditions, parameters = _filters(suite, builder)
-    parameters.update({'rule': rule, 'since': since, 'until': until, 'limit': limit})
+    scoping, parameters = _filters(suite, builders)
+    parameters.update({'since': since, 'until': until, 'limit': limit})
+    where, having, bound = filters.clause(conditions)
+    parameters.update(bound)
+    narrowing = f' AND {where}' if where else ''
+    grouping = f' HAVING {having}' if having else ''
+    selection = (f'''FROM latest_flakiness_verdicts AS verdict
+                JOIN build_verdicts AS build USING (build_id)
+                WHERE verdict.rule IS NOT NULL AND {WINDOW}{scoping}{narrowing}
+                GROUP BY verdict.test_name{grouping}''')
+    # Counted through a subquery whether or not there is a HAVING, because this is what tells a
+    # reader the cap cut the set, not what clamps anything: `Convictions.truncated` compares it
+    # against the rows actually returned below.
     total = connection.execute(
-        f'''SELECT COUNT(DISTINCT verdict.test_name)
-            FROM latest_flakiness_verdicts AS verdict
-            JOIN build_verdicts AS build USING (build_id)
-            WHERE verdict.rule = :rule AND {WINDOW}{conditions}''',
-        parameters,
+        f'SELECT COUNT(*) FROM (SELECT verdict.test_name {selection})', parameters,
     ).fetchone()[0]
     rows = connection.execute(
+        # SQLite takes bare columns beside a single MAX() from the row that produced it, so builder,
+        # build_number and pr_id all describe the last-seen build.
         f'''SELECT verdict.test_name,
+                   GROUP_CONCAT(DISTINCT verdict.rule) AS rules,
                    COUNT(*) AS convictions,
                    COUNT(DISTINCT build.builder) AS queues,
                    MAX(build.started_at) AS last_seen,
                    build.builder, build.builder_id, build.build_number, build.pr_id,
                    build.suite, build.platform, build.style, build.flavor
-            FROM latest_flakiness_verdicts AS verdict
-            JOIN build_verdicts AS build USING (build_id)
-            WHERE verdict.rule = :rule AND {WINDOW}{conditions}
-            GROUP BY verdict.test_name
-            ORDER BY convictions DESC, last_seen DESC
+            {selection}
+            ORDER BY {filters.order_by(filters.TESTS, sort_keys)}
             LIMIT :limit''',
         parameters,
     ).fetchall()
@@ -156,7 +208,7 @@ def convicted_tests(
         tests=[
             ConvictedTest(
                 test_name=row['test_name'],
-                rule=rule,
+                rules=tuple(sorted(row['rules'].split(','))) if row['rules'] else (),
                 convictions=row['convictions'],
                 queues=row['queues'],
                 last_seen=row['last_seen'],
@@ -169,6 +221,55 @@ def convicted_tests(
             for row in rows
         ],
         total=total,
+        limit=limit,
+    )
+
+
+def test_convictions(
+    connection: sqlite3.Connection,
+    since: int,
+    until: int,
+    test_name: str,
+    suite: Optional[str] = None,
+    builders: tuple = (),
+    limit: int = 200,
+) -> 'TestConvictions':
+    """Every conviction of one test in the window, newest first, for that test's own drilldown,
+    capped at `limit` so a test convicted very often still hands back a bounded page rather than
+    every conviction it has ever drawn, alongside the total the cap cut it from and whether it did.
+
+    `test_name` is bound, never spelled into the SQL. The total is counted through the same WHERE
+    as the capped rows, so the two cannot disagree about what was cut.
+    """
+    conditions, parameters = _window_parameters(since, until, suite, builders)
+    parameters.update({'test_name': test_name, 'limit': limit})
+    scoping = f'''FROM latest_flakiness_verdicts AS verdict
+                JOIN build_verdicts AS build USING (build_id)
+                WHERE verdict.rule IS NOT NULL AND verdict.test_name = :test_name AND {WINDOW}{conditions}'''
+    total = connection.execute(f'SELECT COUNT(*) {scoping}', parameters).fetchone()[0]
+    rows = connection.execute(
+        f'''SELECT verdict.rule, build.builder, build.builder_id, build.build_number, build.pr_id,
+                   build.started_at, build.suite, build.platform, build.style, build.flavor
+            {scoping}
+            ORDER BY build.started_at DESC, build.build_id DESC
+            LIMIT :limit''',
+        parameters,
+    ).fetchall()
+    return TestConvictions(
+        convictions=tuple(
+            TestConviction(
+                rule=row['rule'],
+                builder=row['builder'],
+                builder_id=row['builder_id'],
+                build_number=row['build_number'],
+                pr_id=row['pr_id'],
+                started_at=row['started_at'],
+                configuration=results.Configuration.of_build(row),
+            )
+            for row in rows
+        ),
+        total=total,
+        limit=limit,
     )
 
 
@@ -179,6 +280,10 @@ def _counts_by_builder(connection: sqlite3.Connection, sql: str, parameters: dic
 def queue_activity(connection: sqlite3.Connection, since: int, until: int,
                    suite: Optional[str] = None) -> list:
     """Per queue: how often it asked, how often it convicted, how often the query failed.
+
+    Takes no builder/group selection: this is the window's whole set of active queues, which is
+    what the queue dropdown's tree is built from, so a reader narrowing to one queue never makes
+    the others disappear from the list they could pick instead.
 
     Only RunWebKitTests and ReRunWebKitTests set the properties behind builds_queried (steps.py).
     They ask only when a run had failures, the pull request targets main, and the limit held.

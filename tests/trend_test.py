@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime
-from typing import Optional
 
 from ews_dashboard import config
 from ews_dashboard.analysis import false_positive, trend
@@ -20,11 +19,11 @@ def _noon(day: datetime.date) -> int:
 
 class TestDaily(fixtures.DatabaseTest):
     def _points(self, days: int = 3, rolling: int = trend.ROLLING_DAYS,
-                builder: Optional[str] = None) -> list:
+                builders: tuple = ()) -> list:
         history = fixtures.StubHistory({'fast/pre.html': UNRELIABLE, 'fast/real.html': RELIABLE})
         return trend.daily(
             self.connection, false_positive.live_classifier(self.connection, history),
-            LAST_DAY, days=days, rolling=rolling, builder=builder,
+            LAST_DAY, days=days, rolling=rolling, builders=builders,
         )
 
     def _store_blamed_build(self, number: int, day: datetime.date, blamed: bool = True,
@@ -82,8 +81,8 @@ class TestDaily(fixtures.DatabaseTest):
         self._store_blamed_build(2, LAST_DAY, blamed=False,
                                  builder=fixtures.GTK_BUILDER, builder_id=11)
         self.assertEqual(self._points(days=1)[0].daily_pct, 50.0)
-        self.assertEqual(self._points(days=1, builder=fixtures.LAYOUT_BUILDER)[0].daily_pct, 100.0)
-        self.assertEqual(self._points(days=1, builder=fixtures.GTK_BUILDER)[0].daily_pct, 0.0)
+        self.assertEqual(self._points(days=1, builders=(fixtures.LAYOUT_BUILDER,))[0].daily_pct, 100.0)
+        self.assertEqual(self._points(days=1, builders=(fixtures.GTK_BUILDER,))[0].daily_pct, 0.0)
 
 
 class TestDeploymentsWithin(fixtures.DatabaseTest):
