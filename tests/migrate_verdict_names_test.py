@@ -221,3 +221,97 @@ class TestMigrate(fixtures.DatabaseTest):
 class TestFreshDatabase(fixtures.DatabaseTest):
     def test_a_database_created_from_the_current_schema_needs_no_migration(self) -> None:
         self.assertFalse(migrate_verdict_names.needs_migration(self.connection))
+
+
+# The table as schema.sql declared it before `landed_at` and the currency columns were added: the
+# constraint already matches today's, and no row is stored under a retired name.
+CURRENT_CONSTRAINT_TABLE_SQL = '''CREATE TABLE escape_verdicts (
+    build_id        INTEGER NOT NULL REFERENCES build_verdicts(build_id) ON DELETE CASCADE,
+    test_name       TEXT    NOT NULL,
+
+    verdict         TEXT    NOT NULL CHECK (verdict IN (
+                        'ESCAPED', 'FAILS_ON_MAIN', 'CONTAINED',
+                        'NO_RUNS', 'NO_BASELINE', 'TREE_DIVERGED'
+                    )),
+
+    runs_before     INTEGER NOT NULL DEFAULT 0,
+    failed_before   INTEGER NOT NULL DEFAULT 0,
+    runs_after      INTEGER NOT NULL DEFAULT 0,
+    failed_after    INTEGER NOT NULL DEFAULT 0,
+
+    window_ends_at  INTEGER NOT NULL,
+    decided_at      INTEGER NOT NULL,
+
+    PRIMARY KEY (build_id, test_name)
+)'''
+
+
+class TestMissingColumns(fixtures.DatabaseTest):
+    def setUp(self) -> None:
+        super().setUp()
+        with self.connection:
+            self.connection.execute('DROP TABLE escape_verdicts')
+            self.connection.execute(CURRENT_CONSTRAINT_TABLE_SQL)
+
+    def test_a_table_missing_the_newer_columns_still_needs_a_rebuild(self) -> None:
+        """The constraint already matches and nothing is stored under a retired name, but the table
+        predates `landed_at` and the currency columns, so a rebuild is still outstanding."""
+        self.assertEqual(
+            migrate_verdict_names.permitted_verdicts(
+                migrate_verdict_names.live_table_sql(self.connection)),
+            migrate_verdict_names.permitted_verdicts(migrate_verdict_names.schema_table_sql()),
+        )
+
+        self.assertTrue(migrate_verdict_names.needs_migration(self.connection))
+
+        migrate_verdict_names.migrate(self.connection)
+
+        self.assertFalse(migrate_verdict_names.needs_migration(self.connection))
+
+
+# The current schema's columns, plus one schema.sql no longer declares: a live table can carry a
+# column a schema edit dropped, and a migration must never discard that column's data silently.
+EXTRA_COLUMN_TABLE_SQL = '''CREATE TABLE escape_verdicts (
+    build_id        INTEGER NOT NULL REFERENCES build_verdicts(build_id) ON DELETE CASCADE,
+    test_name       TEXT    NOT NULL,
+
+    verdict         TEXT    NOT NULL CHECK (verdict IN (
+                        'ESCAPED', 'FAILS_ON_MAIN', 'CONTAINED',
+                        'NO_RUNS', 'NO_BASELINE', 'TREE_DIVERGED'
+                    )),
+
+    runs_before       INTEGER NOT NULL DEFAULT 0,
+    failed_before     INTEGER NOT NULL DEFAULT 0,
+    runs_after        INTEGER NOT NULL DEFAULT 0,
+    failed_after      INTEGER NOT NULL DEFAULT 0,
+
+    recent_runs       INTEGER,
+    recent_failed     INTEGER,
+    recent_checked_at INTEGER,
+
+    landed_at       INTEGER,
+    window_ends_at  INTEGER NOT NULL,
+    decided_at      INTEGER NOT NULL,
+
+    retired_flag    INTEGER,
+
+    PRIMARY KEY (build_id, test_name)
+)'''
+
+
+class TestExtraColumns(fixtures.DatabaseTest):
+    def setUp(self) -> None:
+        super().setUp()
+        with self.connection:
+            self.connection.execute('DROP TABLE escape_verdicts')
+            self.connection.execute(EXTRA_COLUMN_TABLE_SQL)
+
+    def test_a_table_with_a_column_schema_no_longer_declares_still_needs_a_rebuild(self) -> None:
+        self.assertEqual(migrate_verdict_names.extra_columns(self.connection),
+                         frozenset({'retired_flag'}))
+        self.assertTrue(migrate_verdict_names.needs_migration(self.connection))
+
+    def test_migrate_refuses_to_silently_drop_the_extra_column(self) -> None:
+        with self.assertRaises(RuntimeError) as context:
+            migrate_verdict_names.migrate(self.connection)
+        self.assertIn('retired_flag', str(context.exception))

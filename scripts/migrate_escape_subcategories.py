@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""Fold ESCAPED_RARELY back into ESCAPED and give the table its currency columns.
+"""Give the table `landed_at` and its currency columns, and fold in ESCAPED_RARELY should a row ever
+carry it.
 
     python3 -m scripts.migrate_escape_subcategories
     python3 -m scripts.migrate_escape_subcategories --database other.db
 
-ESCAPED_RARELY was a second stored verdict for a conviction that excused something main had not been
-failing on few failures rather than many. It is now one stored verdict with the rate read off
-`runs_after` and `failed_after` wherever an escape is shown, so a rarity beside the counts can never
-disagree with them. Every row stored under the retired name is the same answer and moves to ESCAPED.
-
-The same rebuild adds `recent_runs`, `recent_failed` and `recent_checked_at`, which hold whether main
-is still failing an escaped test. They arrive null, which is what says nobody has asked yet: the
+The rebuild adds `landed_at`, plus the currency columns `recent_runs`, `recent_failed` and
+`recent_checked_at`, which hold whether main is still failing an escaped test. They arrive null,
+which is what says nobody has asked yet: the
 assess pass fills them in for the escapes alone.
 
+ESCAPED_RARELY never reached a committed schema.sql — no CHECK constraint this codebase has ever
+declared has permitted it — so the fold below has nothing to do against a real database. It stays
+in because it costs nothing to leave in and because ESCAPED_RARELY and ESCAPED were always the same
+answer to the one question a verdict here answers: whether main failed the test after the landing
+without having failed it before. The rate is read off `runs_after` and `failed_after` wherever an
+escape is shown, so a rarity beside the counts can never disagree with them.
+
 The table is rebuilt rather than altered because db.initialize() creates it with `CREATE TABLE IF NOT
-EXISTS`, so an edit to schema.sql never reaches a database that already has one — neither the
-narrowed CHECK constraint, which now rejects ESCAPED_RARELY, nor the three new columns.
+EXISTS`, so an edit to schema.sql never reaches a database that already has one — neither the current
+CHECK constraint nor the three new columns.
 
 Run once. A second run finds nothing to do and says so.
 """
@@ -29,8 +33,9 @@ import sys
 
 from ews_dashboard import config, db
 from ews_dashboard.analysis import escapes
-from scripts.migrate_verdict_names import (COPY_BATCH_ROWS, TABLE, live_table_sql,
-                                           permitted_verdicts, schema_table_sql, verdict_counts)
+from scripts.migrate_verdict_names import (COPY_BATCH_ROWS, TABLE, extra_columns, live_table_sql,
+                                           missing_columns, permitted_verdicts, schema_table_sql,
+                                           verdict_counts)
 
 TEMPORARY_TABLE = f'{TABLE}_subcategorised'
 
@@ -46,44 +51,14 @@ def retired_rows(connection: sqlite3.Connection) -> int:
     return verdict_counts(connection).get(RETIRED_VERDICT, 0)
 
 
-def _columns(table_sql: str) -> frozenset:
-    """The column names a `CREATE TABLE` statement declares, as sqlite reads them.
-
-    Created in a scratch database and read back through PRAGMA rather than parsed here: the verdict
-    names inside the CHECK constraint sit on their own lines and any line-wise reading of the
-    statement counts them as columns. The foreign key's target is not resolved at CREATE time, so the
-    scratch database needs nothing else in it.
-    """
-    scratch = sqlite3.connect(':memory:')
-    try:
-        scratch.execute(table_sql)
-        return frozenset(row[1] for row in scratch.execute('PRAGMA table_info(probe)'))
-    finally:
-        scratch.close()
-
-
-def missing_columns(connection: sqlite3.Connection) -> frozenset:
-    """Columns schema.sql declares that the live table does not have."""
-    live = frozenset(row['name'] for row in connection.execute(f'PRAGMA table_info({TABLE})'))
-    return _columns(schema_table_sql(name='probe')) - live
-
-
-def extra_columns(connection: sqlite3.Connection) -> frozenset:
-    """Columns the live table has that schema.sql no longer declares.
-
-    `_copy_rows` only names the live table's own columns, so one of these left in place would abort
-    the INSERT into the rebuilt table mid-transaction rather than being dropped along with the rest.
-    """
-    live = frozenset(row['name'] for row in connection.execute(f'PRAGMA table_info({TABLE})'))
-    return live - _columns(schema_table_sql(name='probe'))
-
-
 def needs_migration(connection: sqlite3.Connection) -> bool:
-    """Whether any of the three halves of the problem is still present.
+    """Whether any of the three cases that call for a rebuild is still present.
 
     The constraint, the rows and the columns fail separately: a database with no ESCAPED_RARELY row
     left can still permit the name, and one that permits exactly the right names can still be missing
-    the currency columns, which is what makes a plain UPDATE impossible either way.
+    `landed_at` or the currency columns, or still carry a column schema.sql no longer declares, either
+    of which makes a plain UPDATE impossible — the latter is a rebuild `migrate()` refuses to do
+    silently.
     """
     if permitted_verdicts(live_table_sql(connection)) != permitted_verdicts(schema_table_sql()):
         return True
@@ -140,16 +115,15 @@ def migrate(connection: sqlite3.Connection) -> int:
     cascade. `foreign_key_check` inside the transaction proves nothing was orphaned before anything
     is committed.
     """
-    columns = [row['name'] for row in connection.execute(f'PRAGMA table_info({TABLE})')]
-    extra = extra_columns(connection)
-    if extra:
-        raise RuntimeError(f'{TABLE} has {sorted(extra)}, which schema.sql no longer declares; '
-                           'nothing was changed')
-    companions = _companion_objects(connection)
-
-    connection.execute('PRAGMA foreign_keys = OFF')
-    connection.execute('BEGIN IMMEDIATE')
     try:
+        connection.execute('PRAGMA foreign_keys = OFF')
+        connection.execute('BEGIN IMMEDIATE')
+        companions = _companion_objects(connection)
+        columns = [row['name'] for row in connection.execute(f'PRAGMA table_info({TABLE})')]
+        extra = extra_columns(connection)
+        if extra:
+            raise RuntimeError(f'{TABLE} has {sorted(extra)}, which schema.sql no longer declares; '
+                               'nothing was changed')
         connection.execute(f'DROP TABLE IF EXISTS {TEMPORARY_TABLE}')
         connection.execute(schema_table_sql(name=TEMPORARY_TABLE))
         copied = _copy_rows(connection, columns)
@@ -161,11 +135,13 @@ def migrate(connection: sqlite3.Connection) -> int:
         if orphaned:
             raise RuntimeError(f'{len(orphaned)} rows would be left orphaned; nothing was changed')
     except BaseException:
-        connection.execute('ROLLBACK')
-        connection.execute('PRAGMA foreign_keys = ON')
+        if connection.in_transaction:
+            connection.execute('ROLLBACK')
         raise
-    connection.execute('COMMIT')
-    connection.execute('PRAGMA foreign_keys = ON')
+    else:
+        connection.execute('COMMIT')
+    finally:
+        connection.execute('PRAGMA foreign_keys = ON')
     return copied
 
 

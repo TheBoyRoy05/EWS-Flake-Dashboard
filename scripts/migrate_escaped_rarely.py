@@ -15,10 +15,10 @@ side of the landing, so `escapes.redecided` reaches the answer offline from the 
 The table is rebuilt rather than updated in place, because db.initialize() creates the table with
 `CREATE TABLE IF NOT EXISTS`, so an edit to schema.sql never reaches a database that already has one.
 
-Spent, and kept for the record: it was written when a low-rate escape was stored as ESCAPED_RARELY,
-which `scripts/migrate_escape_subcategories.py` has since folded back into ESCAPED with the rate read
-off the counts instead. A row it re-decides today therefore lands in ESCAPED however few the failures
-after the landing were.
+Rarity plays no part in the rename: a row this redecides into ESCAPED lands there whatever the failure
+rate after the landing was, because nothing here stores a rate. `rarity_for_counts` reads it off
+`runs_after` and `failed_after` wherever an escape is shown instead, so a rarity beside the counts can
+never disagree with them.
 
 Run once. A second run finds nothing to do and says so.
 """
@@ -32,8 +32,9 @@ import sys
 
 from ews_dashboard import config, db
 from ews_dashboard.analysis import escapes
-from scripts.migrate_verdict_names import (COPY_BATCH_ROWS, TABLE, live_table_sql,
-                                           permitted_verdicts, schema_table_sql, verdict_counts)
+from scripts.migrate_verdict_names import (COPY_BATCH_ROWS, TABLE, extra_columns, live_table_sql,
+                                           missing_columns, permitted_verdicts, schema_table_sql,
+                                           verdict_counts)
 
 TEMPORARY_TABLE = f'{TABLE}_redecided'
 
@@ -57,12 +58,17 @@ def stale_verdicts(connection: sqlite3.Connection) -> int:
 
 
 def needs_migration(connection: sqlite3.Connection) -> bool:
-    """Whether either half of the problem is still present.
+    """Whether any of the three cases that call for a rebuild is still present.
 
-    The rows and the constraint fail separately: a database with nothing left to re-decide can still
-    reject the verdict the assess pass now produces, which is what makes a plain UPDATE impossible.
+    The rows, the constraint and the columns fail separately: a database with nothing left to
+    re-decide can still reject the verdict the assess pass now produces, and either of those can
+    already agree with schema.sql while the table itself still predates `landed_at` and the currency
+    columns added since, or still carries a column schema.sql no longer declares, either of which
+    makes a plain UPDATE impossible — the latter is a rebuild `migrate()` refuses to do silently.
     """
     if permitted_verdicts(live_table_sql(connection)) != permitted_verdicts(schema_table_sql()):
+        return True
+    if missing_columns(connection) or extra_columns(connection):
         return True
     return stale_verdicts(connection) > 0
 
@@ -109,12 +115,15 @@ def migrate(connection: sqlite3.Connection) -> int:
     cascade. `foreign_key_check` inside the transaction proves nothing was orphaned before anything
     is committed.
     """
-    columns = [row['name'] for row in connection.execute(f'PRAGMA table_info({TABLE})')]
-    companions = _companion_objects(connection)
-
-    connection.execute('PRAGMA foreign_keys = OFF')
-    connection.execute('BEGIN IMMEDIATE')
     try:
+        connection.execute('PRAGMA foreign_keys = OFF')
+        connection.execute('BEGIN IMMEDIATE')
+        companions = _companion_objects(connection)
+        columns = [row['name'] for row in connection.execute(f'PRAGMA table_info({TABLE})')]
+        extra = extra_columns(connection)
+        if extra:
+            raise RuntimeError(f'{TABLE} has {sorted(extra)}, which schema.sql no longer declares; '
+                               'nothing was changed')
         connection.execute(f'DROP TABLE IF EXISTS {TEMPORARY_TABLE}')
         connection.execute(schema_table_sql(name=TEMPORARY_TABLE))
         copied = _copy_rows(connection, columns)
@@ -126,11 +135,13 @@ def migrate(connection: sqlite3.Connection) -> int:
         if orphaned:
             raise RuntimeError(f'{len(orphaned)} rows would be left orphaned; nothing was changed')
     except BaseException:
-        connection.execute('ROLLBACK')
-        connection.execute('PRAGMA foreign_keys = ON')
+        if connection.in_transaction:
+            connection.execute('ROLLBACK')
         raise
-    connection.execute('COMMIT')
-    connection.execute('PRAGMA foreign_keys = ON')
+    else:
+        connection.execute('COMMIT')
+    finally:
+        connection.execute('PRAGMA foreign_keys = ON')
     return copied
 
 
@@ -159,14 +170,16 @@ def main() -> int:
     connection = db.connect(path)
     try:
         if not needs_migration(connection):
-            print(f'{path} is already migrated; no verdict to decide again')
+            print(f'{path} is already migrated; no verdict to decide again and no column to add')
             _print_counts('verdicts stored', verdict_counts(connection))
             return 0
         print(f'Re-deciding {TABLE} in {path}')
         _print_counts('before', verdict_counts(connection))
         stale = stale_verdicts(connection)
+        added = sorted(missing_columns(connection))
         copied = migrate(connection)
         print(f'  copied {copied} rows under the current constraint, {stale} decided differently')
+        print(f'  columns added: {", ".join(added) or "none"}')
         _print_counts('after', verdict_counts(connection))
     finally:
         connection.close()

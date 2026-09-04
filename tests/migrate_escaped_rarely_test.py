@@ -192,13 +192,30 @@ class TestMigrate(fixtures.DatabaseTest):
         self.assertEqual(migrate_escaped_rarely.stale_verdicts(self.connection), 0)
         self.assertEqual(self._counts(), counts)
 
-    def test_a_table_with_nothing_stale_is_left_alone(self) -> None:
-        """This script's only remaining job is the rows: the constraint it once widened is the one the
-        current schema carries, so a table whose every verdict already agrees needs no rebuild."""
+    def test_a_table_missing_the_newer_columns_still_needs_a_rebuild(self) -> None:
+        """The rows and the columns fail separately: a verdict that already agrees with the current
+        rule still leaves the table without `landed_at` and the currency columns until the rebuild
+        this script also runs brings them in."""
         self._store_verdict(1, escapes.CONTAINED, runs_after=6, failed_after=0)
         self.assertEqual(migrate_escaped_rarely.stale_verdicts(self.connection), 0)
 
+        self.assertTrue(migrate_escaped_rarely.needs_migration(self.connection))
+
+        migrate_escaped_rarely.migrate(self.connection)
+
         self.assertFalse(migrate_escaped_rarely.needs_migration(self.connection))
+
+    def test_migrate_refuses_to_silently_drop_a_column_schema_no_longer_declares(self) -> None:
+        with self.connection:
+            self.connection.execute('ALTER TABLE escape_verdicts ADD COLUMN retired_flag INTEGER')
+        self._store_verdict(1, escapes.CONTAINED, runs_after=6, failed_after=0)
+        self.assertEqual(migrate_escaped_rarely.extra_columns(self.connection),
+                         frozenset({'retired_flag'}))
+
+        self.assertTrue(migrate_escaped_rarely.needs_migration(self.connection))
+        with self.assertRaises(RuntimeError) as context:
+            migrate_escaped_rarely.migrate(self.connection)
+        self.assertIn('retired_flag', str(context.exception))
 
     def test_foreign_keys_are_on_again_afterwards(self) -> None:
         """The rebuild turns them off, and a connection left that way would let later work store a

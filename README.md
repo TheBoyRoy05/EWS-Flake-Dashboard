@@ -75,3 +75,6 @@ with no framework that enhances the tests page's filter/sort chips and the queue
 tree — ticking a group or version there also ticks what it contains on screen, and narrows the
 submitted query to that parent's own value rather than every builder it happens to contain today;
 every page works the same, one request per click, with it blocked.
+
+Known gaps and planned work are tracked in [`docs/open-work.md`](docs/open-work.md), not an issue
+tracker, so a reader looking at the code can see in one place what is not done yet and why.

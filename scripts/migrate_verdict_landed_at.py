@@ -32,8 +32,7 @@ import sqlite3
 import sys
 
 from ews_dashboard import config, db, webkit_checkout
-from scripts.migrate_escape_subcategories import missing_columns
-from scripts.migrate_verdict_names import TABLE
+from scripts.migrate_verdict_names import TABLE, missing_columns
 
 COLUMN = 'landed_at'
 
@@ -85,8 +84,7 @@ def backfillable_rows(connection: sqlite3.Connection) -> int:
 def needs_migration(connection: sqlite3.Connection) -> bool:
     """Whether either half of the problem is still present.
 
-    The column and the rows fail separately, and this is the guard `migrate_verdict_names` got
-    wrong by gating on a CHECK-constraint diff alone: a table whose constraint matches schema.sql can
+    The column and the rows fail separately: a table whose constraint matches schema.sql can
     still be missing a column, and a table that has the column can still hold rows nothing filled it
     in for.
     """

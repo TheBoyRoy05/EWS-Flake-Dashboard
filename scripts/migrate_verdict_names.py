@@ -95,14 +95,50 @@ def verdict_counts(connection: sqlite3.Connection) -> dict:
     }
 
 
-def needs_migration(connection: sqlite3.Connection) -> bool:
-    """Whether either half of the problem is still present.
+def _columns(table_sql: str, table: str) -> frozenset:
+    """The column names a `CREATE TABLE` statement declares, as sqlite reads them.
 
-    The rows and the constraint are separate failures: a database can have no row left under a
-    retired name and still reject the name that replaced it, which is the state that made a plain
-    UPDATE impossible.
+    Created in a scratch database and read back through PRAGMA rather than parsed here: the verdict
+    names inside the CHECK constraint sit on their own lines and any line-wise reading of the
+    statement counts them as columns. The foreign key's target is not resolved at CREATE time, so the
+    scratch database needs nothing else in it.
+    """
+    scratch = sqlite3.connect(':memory:')
+    try:
+        scratch.execute(table_sql)
+        return frozenset(row[1] for row in scratch.execute(f'PRAGMA table_info({table})'))
+    finally:
+        scratch.close()
+
+
+def missing_columns(connection: sqlite3.Connection) -> frozenset:
+    """Columns schema.sql declares that the live table does not have."""
+    live = frozenset(row['name'] for row in connection.execute(f'PRAGMA table_info({TABLE})'))
+    return _columns(schema_table_sql(name='probe'), table='probe') - live
+
+
+def extra_columns(connection: sqlite3.Connection) -> frozenset:
+    """Columns the live table has that schema.sql no longer declares.
+
+    `_copy_rows` only names the live table's own columns, so one of these left in place would abort
+    the INSERT into the rebuilt table mid-transaction rather than being dropped along with the rest.
+    """
+    live = frozenset(row['name'] for row in connection.execute(f'PRAGMA table_info({TABLE})'))
+    return live - _columns(schema_table_sql(name='probe'), table='probe')
+
+
+def needs_migration(connection: sqlite3.Connection) -> bool:
+    """Whether any of the three cases that call for a rebuild is still present.
+
+    The constraint, the rows and the columns fail separately: a database can have no row left under a
+    retired name and still reject the name that replaced it, and either of those can already agree
+    with schema.sql while the table itself still predates a column added since, or still carries a
+    column schema.sql no longer declares, either of which makes a plain UPDATE impossible — the latter
+    is a rebuild `migrate()` refuses to do silently.
     """
     if permitted_verdicts(live_table_sql(connection)) != permitted_verdicts(schema_table_sql()):
+        return True
+    if missing_columns(connection) or extra_columns(connection):
         return True
     return any(verdict in RETIRED_VERDICTS for verdict in verdict_counts(connection))
 
@@ -149,12 +185,15 @@ def migrate(connection: sqlite3.Connection) -> int:
     cascade. `foreign_key_check` inside the transaction proves nothing was orphaned before anything
     is committed.
     """
-    columns = [row['name'] for row in connection.execute(f'PRAGMA table_info({TABLE})')]
-    companions = _companion_objects(connection)
-
-    connection.execute('PRAGMA foreign_keys = OFF')
-    connection.execute('BEGIN IMMEDIATE')
     try:
+        connection.execute('PRAGMA foreign_keys = OFF')
+        connection.execute('BEGIN IMMEDIATE')
+        companions = _companion_objects(connection)
+        columns = [row['name'] for row in connection.execute(f'PRAGMA table_info({TABLE})')]
+        extra = extra_columns(connection)
+        if extra:
+            raise RuntimeError(f'{TABLE} has {sorted(extra)}, which schema.sql no longer declares; '
+                               'nothing was changed')
         connection.execute(f'DROP TABLE IF EXISTS {TEMPORARY_TABLE}')
         connection.execute(schema_table_sql(name=TEMPORARY_TABLE))
         copied = _copy_rows(connection, columns)
@@ -166,11 +205,13 @@ def migrate(connection: sqlite3.Connection) -> int:
         if orphaned:
             raise RuntimeError(f'{len(orphaned)} rows would be left orphaned; nothing was changed')
     except BaseException:
-        connection.execute('ROLLBACK')
-        connection.execute('PRAGMA foreign_keys = ON')
+        if connection.in_transaction:
+            connection.execute('ROLLBACK')
         raise
-    connection.execute('COMMIT')
-    connection.execute('PRAGMA foreign_keys = ON')
+    else:
+        connection.execute('COMMIT')
+    finally:
+        connection.execute('PRAGMA foreign_keys = ON')
     return copied
 
 
@@ -199,13 +240,15 @@ def main() -> int:
     connection = db.connect(path)
     try:
         if not needs_migration(connection):
-            print(f'{path} is already migrated; no verdict names to rewrite')
+            print(f'{path} is already migrated; no verdict names to rewrite and no column to add')
             _print_counts('verdicts stored', verdict_counts(connection))
             return 0
         print(f'Migrating {TABLE} in {path}')
         _print_counts('before', verdict_counts(connection))
+        added = sorted(missing_columns(connection))
         copied = migrate(connection)
         print(f'  copied {copied} rows under the current constraint')
+        print(f'  columns added: {", ".join(added) or "none"}')
         _print_counts('after', verdict_counts(connection))
     finally:
         connection.close()

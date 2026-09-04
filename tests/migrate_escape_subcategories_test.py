@@ -7,6 +7,8 @@ import sqlite3
 from ews_dashboard import config
 from ews_dashboard.analysis import escapes
 from scripts import migrate_escape_subcategories
+from scripts.migrate_verdict_names import (live_table_sql, missing_columns, permitted_verdicts,
+                                           schema_table_sql, verdict_counts)
 from tests import fixtures
 
 TEST = 'fast/a.html'
@@ -15,8 +17,8 @@ WINDOW_ENDS_AT = LANDED_AT + escapes.ESCAPE_WINDOW_SECONDS
 
 RETIRED = migrate_escape_subcategories.RETIRED_VERDICT
 
-# The table as it stood while a low-rate escape was a stored verdict of its own: the retired name in
-# the CHECK constraint, and none of the three columns that say whether main is still failing the test.
+# A constructed hypothetical: no committed schema.sql ever declared ESCAPED_RARELY, but the migration
+# has to handle whatever a pre-existing live table turns out to carry.
 PREVIOUS_TABLE_SQL = '''CREATE TABLE escape_verdicts (
     build_id        INTEGER NOT NULL REFERENCES build_verdicts(build_id) ON DELETE CASCADE,
     test_name       TEXT    NOT NULL,
@@ -67,7 +69,7 @@ class TestMigrate(fixtures.DatabaseTest):
         return build_id
 
     def _counts(self) -> dict:
-        return migrate_escape_subcategories.verdict_counts(self.connection)
+        return verdict_counts(self.connection)
 
     def _row(self, build_id: int) -> sqlite3.Row:
         return self.connection.execute(
@@ -127,12 +129,15 @@ class TestMigrate(fixtures.DatabaseTest):
         with self.assertRaises(sqlite3.OperationalError):
             self.connection.execute('UPDATE escape_verdicts SET recent_checked_at = 1')
 
-    def test_the_rebuilt_table_rejects_the_retired_verdict(self) -> None:
-        self._store_verdict(1, escapes.CONTAINED, runs_after=6, failed_after=0)
+    def test_the_rebuilt_table_no_longer_permits_the_retired_verdict(self) -> None:
+        """The fold is not just cosmetic: a row stored under the retired name before the rebuild
+        cannot come back once it is done, because the constraint the rebuilt table carries is the
+        current one, read off the live table rather than assumed."""
+        self._store_verdict(1, RETIRED)
+
         migrate_escape_subcategories.migrate(self.connection)
 
-        with self.assertRaises(sqlite3.IntegrityError):
-            self._store_verdict(2, RETIRED)
+        self.assertNotIn(RETIRED, permitted_verdicts(live_table_sql(self.connection)))
 
     def test_the_index_the_dropped_table_had_comes_back(self) -> None:
         """Dropping a table takes its indexes with it, and every verdict count groups on this one."""
@@ -154,19 +159,20 @@ class TestMigrate(fixtures.DatabaseTest):
 
         self.assertFalse(migrate_escape_subcategories.needs_migration(self.connection))
         self.assertEqual(migrate_escape_subcategories.retired_rows(self.connection), 0)
-        self.assertEqual(migrate_escape_subcategories.missing_columns(self.connection), frozenset())
+        self.assertEqual(missing_columns(self.connection), frozenset())
         self.assertEqual(self._counts(), counts)
 
-    def test_a_table_with_no_retired_row_still_needs_its_columns(self) -> None:
-        """The rows, the constraint and the columns fail separately, and this table has nothing to
-        rename and nowhere to record a currency answer."""
+    def test_migrate_refuses_to_silently_drop_a_column_schema_no_longer_declares(self) -> None:
+        with self.connection:
+            self.connection.execute('ALTER TABLE escape_verdicts ADD COLUMN retired_flag INTEGER')
         self._store_verdict(1, escapes.CONTAINED, runs_after=6, failed_after=0)
-        self.assertEqual(migrate_escape_subcategories.retired_rows(self.connection), 0)
+        self.assertEqual(migrate_escape_subcategories.extra_columns(self.connection),
+                         frozenset({'retired_flag'}))
 
-        self.assertEqual(migrate_escape_subcategories.missing_columns(self.connection),
-                         frozenset({'recent_runs', 'recent_failed', 'recent_checked_at',
-                                    'landed_at'}))
         self.assertTrue(migrate_escape_subcategories.needs_migration(self.connection))
+        with self.assertRaises(RuntimeError) as context:
+            migrate_escape_subcategories.migrate(self.connection)
+        self.assertIn('retired_flag', str(context.exception))
 
     def test_foreign_keys_are_on_again_afterwards(self) -> None:
         """The rebuild turns them off, and a connection left that way would let later work store a
@@ -199,6 +205,44 @@ class TestMigrate(fixtures.DatabaseTest):
         self.assertEqual(tally.by_verdict[escapes.ESCAPED], 0)
 
 
+def _sql_without_columns(sql: str, columns: tuple) -> str:
+    lines = sql.splitlines()
+    kept = [line for line in lines
+            if not any(line.strip().startswith(column) for column in columns)]
+    return '\n'.join(kept)
+
+
+class TestMissingColumns(fixtures.DatabaseTest):
+    """The current constraint already matches schema.sql, so only the missing-column branch of
+    `needs_migration` can be what fires here."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        current_sql = schema_table_sql()
+        sql_without_new_columns = _sql_without_columns(
+            current_sql, ('landed_at', 'recent_runs', 'recent_failed', 'recent_checked_at'))
+        with self.connection:
+            self.connection.execute('DROP TABLE escape_verdicts')
+            self.connection.execute(sql_without_new_columns)
+
+    def test_a_table_missing_the_newer_columns_still_needs_a_rebuild(self) -> None:
+        """The rows, the constraint and the columns fail separately, and this table has nothing to
+        rename and nowhere to record a currency answer."""
+        self.assertEqual(
+            permitted_verdicts(live_table_sql(self.connection)),
+            permitted_verdicts(schema_table_sql()),
+        )
+        self.assertEqual(missing_columns(self.connection),
+                         frozenset({'recent_runs', 'recent_failed', 'recent_checked_at',
+                                    'landed_at'}))
+
+        self.assertTrue(migrate_escape_subcategories.needs_migration(self.connection))
+
+        migrate_escape_subcategories.migrate(self.connection)
+
+        self.assertFalse(migrate_escape_subcategories.needs_migration(self.connection))
+
+
 class TestFreshDatabase(fixtures.DatabaseTest):
     def test_a_database_created_from_the_current_schema_needs_no_migration(self) -> None:
         self.assertFalse(migrate_escape_subcategories.needs_migration(self.connection))
@@ -207,11 +251,19 @@ class TestFreshDatabase(fixtures.DatabaseTest):
         """schema.sql and VERDICTS have to agree, or a fresh database rejects a verdict the assess
         pass will hand it."""
         self.assertEqual(
-            migrate_escape_subcategories.permitted_verdicts(
-                migrate_escape_subcategories.schema_table_sql()),
+            permitted_verdicts(schema_table_sql()),
             frozenset(escapes.VERDICTS),
         )
 
-    def test_the_retired_verdict_is_no_longer_one_the_code_can_produce(self) -> None:
-        self.assertNotIn(RETIRED, escapes.VERDICTS)
-        self.assertEqual(escapes.verdict_for_counts(152, 0, 96, 1), escapes.ESCAPED)
+    def test_a_fresh_database_rejects_the_retired_verdict(self) -> None:
+        """schema.sql has never declared this name, so a database built from it catches an attempt to
+        store it without any rebuild having to run."""
+        build_id = self.store_build(1, flaky={TEST: config.CLEAN_TREE}, pr_id=1,
+                                    pr_title='A change that landed', sha='a' * 40)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.connection.execute(
+                '''INSERT INTO escape_verdicts (
+                    build_id, test_name, verdict, window_ends_at, decided_at
+                ) VALUES (?, ?, ?, ?, ?)''',
+                (build_id, TEST, RETIRED, WINDOW_ENDS_AT, LANDED_AT),
+            )
