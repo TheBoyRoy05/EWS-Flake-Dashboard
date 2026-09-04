@@ -21,6 +21,8 @@ from ews_dashboard import db, ingest, results, suites
 LAYOUT_BUILDER = 'macOS-Sequoia-Release-WK2-Tests-EWS'
 API_BUILDER = 'macOS-Tahoe-Debug-API-Tests-EWS'
 GTK_BUILDER = 'GTK-Linux-64-bit-Release-Tests-EWS'
+IOS_BUILDER = 'iOS-18-Simulator-WK2-Tests-EWS'
+WPE_BUILDER = 'WPE-Linux-64-bit-Release-Tests-EWS'
 
 IDENTIFIER = '314546@main'
 CONFIGURATION_PROPERTIES = {
