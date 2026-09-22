@@ -108,15 +108,16 @@ class TestRegistry(unittest.TestCase):
 
 # The literal expression each escapes column stands for, repeated here rather than read off the
 # registry for the same reason the tests table's are: an expression that changed under the registry
-# has to fail a test somewhere. Strength and damage are the registered sqlite functions scaled to the
-# percentage the page prints, so a reader filters against the number in the cell.
+# has to fail a test somewhere. Rate increase and damage are the registered sqlite functions scaled to
+# the percentage the page prints, so a reader filters against the number in the cell.
 ESCAPE_EXPRESSIONS = {
     'test': 'outcome.test_name',
     'rule': 'verdict.rule',
     'queue': 'build.builder',
     'verdict': 'outcome.verdict',
     'landed': 'outcome.landed_at',
-    'strength': 'escape_strength(outcome.runs_after, outcome.failed_after) * 100',
+    'increase': ('escape_rate_increase(outcome.runs_before, outcome.failed_before, '
+                 'outcome.runs_after, outcome.failed_after) * 100'),
     'damage': 'escape_damage(outcome.recent_runs, outcome.recent_failed) * 100',
     'runs_after': 'outcome.runs_after',
     'failed_after': 'outcome.failed_after',
@@ -125,10 +126,10 @@ ESCAPE_EXPRESSIONS = {
 # Which escapes columns a reader may order by. The three category names are deliberately absent:
 # ordering a table by a bucket name ships a ranking the alphabet invented — TREE_DIVERGED before
 # ESCAPED is not a severity — which is the judgment TESTS already makes for `rule`, `queue`, `suite`.
-ESCAPE_SORTABLE = {'test', 'landed', 'strength', 'damage', 'runs_after', 'failed_after'}
+ESCAPE_SORTABLE = {'test', 'landed', 'increase', 'damage', 'runs_after', 'failed_after'}
 
 # The escapes columns whose NULL means no evidence was gathered rather than a low value.
-ESCAPE_NULLS_LAST = {'landed', 'strength', 'damage'}
+ESCAPE_NULLS_LAST = {'landed', 'increase', 'damage'}
 
 
 class TestEscapesRegistry(unittest.TestCase):
@@ -140,10 +141,10 @@ class TestEscapesRegistry(unittest.TestCase):
                          ESCAPE_EXPRESSIONS)
 
     def test_the_two_derived_columns_call_the_functions_the_page_derives_them_with(self) -> None:
-        """Not a stored column and not the Wilson formula re-spelled in SQL: one definition, called
-        from the order and printed in the cell, so the two cannot disagree."""
-        self.assertIn(f'{config.ESCAPE_STRENGTH_FUNCTION}(',
-                      filters.ESCAPES.columns['strength'].expression)
+        """Not a stored column and not the Newcombe formula re-spelled in SQL: one definition,
+        called from the order and printed in the cell, so the two cannot disagree."""
+        self.assertIn(f'{config.ESCAPE_INCREASE_FUNCTION}(',
+                      filters.ESCAPES.columns['increase'].expression)
         self.assertIn(f'{config.ESCAPE_DAMAGE_FUNCTION}(',
                       filters.ESCAPES.columns['damage'].expression)
 
@@ -163,7 +164,7 @@ class TestEscapesRegistry(unittest.TestCase):
 
     def test_rates_and_times_descend_first_and_a_test_name_ascends_first(self) -> None:
         self.assertFalse(filters.ESCAPES.columns['test'].descending_first)
-        for name in ('landed', 'strength', 'damage', 'runs_after', 'failed_after'):
+        for name in ('landed', 'increase', 'damage', 'runs_after', 'failed_after'):
             self.assertTrue(filters.ESCAPES.columns[name].descending_first, name)
 
     def test_a_column_whose_null_means_no_evidence_sorts_those_rows_last(self) -> None:
@@ -201,10 +202,10 @@ class TestNullPlacement(unittest.TestCase):
         return keys[0].sql
 
     def test_a_nulls_last_column_pushes_them_last_in_both_directions(self) -> None:
-        expression = ESCAPE_EXPRESSIONS['strength']
-        self.assertEqual(self._sql(filters.ESCAPES, 'strength:desc'),
+        expression = ESCAPE_EXPRESSIONS['increase']
+        self.assertEqual(self._sql(filters.ESCAPES, 'increase:desc'),
                          f'{expression} IS NULL ASC, {expression} DESC')
-        self.assertEqual(self._sql(filters.ESCAPES, 'strength:asc'),
+        self.assertEqual(self._sql(filters.ESCAPES, 'increase:asc'),
                          f'{expression} IS NULL ASC, {expression} ASC')
 
     def test_an_ordinary_column_emits_the_plain_term(self) -> None:
@@ -215,7 +216,7 @@ class TestNullPlacement(unittest.TestCase):
     def test_the_null_term_stays_inside_the_key_order_by_dedupes(self) -> None:
         """`order_by` drops a repeated column by name, so the extra term cannot escape its key and
         leave a stray `IS NULL` ordering the table ahead of the key a reader asked for."""
-        keys = filters.sort_keys(filters.ESCAPES, (('strength', True), ('strength', False)))
+        keys = filters.sort_keys(filters.ESCAPES, (('increase', True), ('increase', False)))
         ordered = filters.order_by(filters.ESCAPES, keys)
         self.assertEqual(ordered.count('IS NULL'), 1)
         self.assertTrue(ordered.endswith(filters.ESCAPES.tiebreak))
@@ -245,7 +246,7 @@ class TestEscapesInjection(unittest.TestCase):
 
     def test_a_column_that_is_not_in_the_escapes_registry_is_not_a_column(self) -> None:
         self.assertIsNone(filters.condition(filters.ESCAPES, PAYLOAD, 'eq', 'x'))
-        self.assertIsNone(filters.condition(filters.ESCAPES, 'strength', PAYLOAD, '1'))
+        self.assertIsNone(filters.condition(filters.ESCAPES, 'increase', PAYLOAD, '1'))
 
 
 class TestEscapesRequested(unittest.TestCase):
@@ -260,14 +261,14 @@ class TestEscapesRequested(unittest.TestCase):
     def test_repeated_clauses_are_read_in_the_order_they_were_written(self) -> None:
         asked = filters.requested(MultiDict([
             (self.ESCAPE_FILTER, 'test:has:webgl'),
-            (self.ESCAPE_FILTER, f'strength:ge:{50}'),
+            (self.ESCAPE_FILTER, f'increase:ge:{50}'),
             (self.ESCAPE_SORT, 'landed:asc'),
-            (self.ESCAPE_SORT, 'strength:desc'),
+            (self.ESCAPE_SORT, 'increase:desc'),
         ]), filters.ESCAPES)
         self.assertEqual([condition.column.name for condition in asked.conditions],
-                         ['test', 'strength'])
+                         ['test', 'increase'])
         self.assertEqual([key.specification for key in asked.sort_keys],
-                         ['landed:asc', 'strength:desc'])
+                         ['landed:asc', 'increase:desc'])
         self.assertEqual(asked.rejected, ())
         self.assertTrue(asked.narrowing)
 
@@ -282,10 +283,10 @@ class TestEscapesRequested(unittest.TestCase):
 
     def test_a_sort_naming_no_direction_reads_the_way_its_column_reads_first(self) -> None:
         asked = filters.requested(MultiDict([
-            (self.ESCAPE_SORT, 'strength'), (self.ESCAPE_SORT, 'test'),
+            (self.ESCAPE_SORT, 'increase'), (self.ESCAPE_SORT, 'test'),
         ]), filters.ESCAPES)
         self.assertEqual([key.specification for key in asked.sort_keys],
-                         ['strength:desc', 'test:asc'])
+                         ['increase:desc', 'test:asc'])
 
 
 # Every operator whose clause describes the whole group a HAVING sees rather than one row a WHERE

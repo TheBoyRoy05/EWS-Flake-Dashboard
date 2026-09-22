@@ -4,10 +4,10 @@
     python3 -m scripts.migrate_escaped_rarely
     python3 -m scripts.migrate_escaped_rarely --database other.db
 
-Until now a conviction whose test failed on main after the landing in under ESCAPE_FAILURE_PCT of the
-runs was called FAILS_ON_MAIN whatever the baseline said, so a test main had never failed before the
-change landed and failed once after it was recorded as main's own failure. Those rows are the
-population this check exists to find, and they are all stored under the wrong name.
+Until now a conviction whose test failed on main after the landing in under half of the runs was called
+FAILS_ON_MAIN whatever the baseline said, so a test main had never failed before the change landed and
+failed once after it was recorded as main's own failure. Those rows are the population this check exists
+to find, and they are all stored under the wrong name.
 
 Nothing has to be asked of results.webkit.org again: every row carries the runs and failures either
 side of the landing, so `escapes.redecided` reaches the answer offline from the counts already there.
@@ -15,10 +15,10 @@ side of the landing, so `escapes.redecided` reaches the answer offline from the 
 The table is rebuilt rather than updated in place, because db.initialize() creates the table with
 `CREATE TABLE IF NOT EXISTS`, so an edit to schema.sql never reaches a database that already has one.
 
-Rarity plays no part in the rename: a row this redecides into ESCAPED lands there whatever the failure
-rate after the landing was, because nothing here stores a rate. `rarity_for_counts` reads it off
-`runs_after` and `failed_after` wherever an escape is shown instead, so a rarity beside the counts can
-never disagree with them.
+How hard the test failed plays no part in the rename: a row this redecides into ESCAPED lands there
+whatever the failure rate after the landing was, because nothing here stores a rate.
+`escapes.rate_increase_for_counts` reads the four counts wherever an escape is shown instead, so no
+figure beside the counts can disagree with them.
 
 Run once. A second run finds nothing to do and says so.
 """

@@ -1425,9 +1425,9 @@ class TestEscapes(WebTest):
         self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED, failed_after=1, runs_after=8,
                             recent_runs=40, recent_failed=3, recent_checked_at=int(time.time()))
         page = self.page('/escapes')
-        self.assertIn('Escape strength', page)
+        self.assertIn('Rate increase', page)
         self.assertIn('Current damage', page)
-        self.assertIn('2.8%', page)
+        self.assertIn('-17.9%', page)
         self.assertIn('1/8', page)
         self.assertIn('7.5%', page)
         self.assertIn('3/40', page)
@@ -1628,9 +1628,10 @@ class TestEscapes(WebTest):
         self.assertNotRegex(form, r'<input type="hidden" name="version"')
         self.assertNotRegex(form, r'<input type="hidden" name="builder"')
 
-    def test_the_headline_counts_a_low_rate_escape_as_an_escape(self) -> None:
-        """A conviction that excused something main had not been failing escaped whether the
-        failures after were many or few, so the figure the page leads with holds both."""
+    def test_the_headline_counts_the_strong_escapes_and_not_the_whole_bucket(self) -> None:
+        """The bucket holds every conviction main failed the test after, and the headline holds the
+        ones the landing measurably worsened. One escape on 1 of 96 runs over a 4-run clean baseline is
+        in the bucket and not in the headline, because nothing about it clears chance."""
         first = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                  pr_title='One')
         second = self.store_build(2, flaky={'fast/b.html': config.CLEAN_TREE}, pr_id=2,
@@ -1641,7 +1642,10 @@ class TestEscapes(WebTest):
         self._stored_escape(second, 'fast/b.html', escapes.ESCAPED, failed_after=1, runs_after=96)
         self._stored_escape(third, 'fast/c.html', escapes.CONTAINED, failed_after=0)
         page = self.page('/escapes')
-        self.assertIn('2 of 3 convictions main answered', page)
+        self.assertIn('Strong escapes', page)
+        self.assertIn('1 of 3 convictions main answered', page)
+        self.assertRegex(page, rf'state-{escapes.ESCAPED}">{escapes.ESCAPED}</span>'
+                               r'</span>\s*<span class="tally">2</span>')
 
     def test_a_low_rate_escape_is_no_category_of_its_own(self) -> None:
         """One bucket, split under itself: a sibling category would let a reader add the two and
@@ -1664,19 +1668,39 @@ class TestEscapes(WebTest):
                             runs_after=96)
         page = self.page('/escapes')
         self.assertNotIn('No conviction in this window escaped:', page)
-        self.assertIn('so the escape rests on few failures', page)
+        self.assertIn('The landing did not measurably worsen it.', page)
 
-    def test_the_rate_split_under_the_escape_bucket_adds_up_to_it(self) -> None:
+    def test_the_significance_split_under_the_escape_bucket_adds_up_to_it(self) -> None:
         strong = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                   pr_title='One')
-        rare = self.store_build(2, flaky={'fast/b.html': config.CLEAN_TREE}, pr_id=2,
-                                pr_title='Two')
+        unproven = self.store_build(2, flaky={'fast/b.html': config.CLEAN_TREE}, pr_id=2,
+                                    pr_title='Two')
         self._stored_escape(strong, 'fast/a.html', escapes.ESCAPED)
-        self._stored_escape(rare, 'fast/b.html', escapes.ESCAPED, failed_after=1, runs_after=96)
+        self._stored_escape(unproven, 'fast/b.html', escapes.ESCAPED, failed_after=1, runs_after=96)
         page = self.page('/escapes')
-        self.assertRegex(page, rf'{config.ESCAPE_FAILURE_PCT}% of the runs or more</span>'
-                               r'<span class="tally">1</span>')
-        self.assertRegex(page, r'fewer than that</span><span class="tally">1</span>')
+        self.assertRegex(page, r'strongly escaped</span></span><span class="tally">1</span>')
+        self.assertRegex(page, r'unproven</span><span class="tally">1</span>')
+
+    def test_the_strong_line_carries_the_bucket_s_own_state_pill_for_emphasis(self) -> None:
+        """It is the number this page exists to surface, so it is not one more grey row: it reuses the
+        same `state` pill the ESCAPED entry above it wears, and the unproven line stays plain."""
+        strong = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                  pr_title='One')
+        self._stored_escape(strong, 'fast/a.html', escapes.ESCAPED)
+        page = self.page('/escapes')
+        self.assertIn(f'<span class="state state-{escapes.ESCAPED}">strongly escaped</span>', page)
+        self.assertIn('<span class="label">unproven</span>', page)
+
+    def test_the_strong_label_says_it_no_longer_means_a_share_of_runs(self) -> None:
+        """The word is reassigned by this change, so a reader who knows the old 50%-of-runs meaning
+        must be told, in the tooltip and in the legend rather than in the label."""
+        strong = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                  pr_title='One')
+        self._stored_escape(strong, 'fast/a.html', escapes.ESCAPED)
+        page = self.page('/escapes')
+        self.assertIn('Strong no longer means a share of the runs after the landing failing.', page)
+        self.assertIn('not the old 50% run share', page)
+        self.assertIn('alpha 0.10', page)
 
     def currency_counts(self, page: str) -> dict:
         """Every line of the currency split, by its label, so a test can add them up."""
@@ -1796,6 +1820,42 @@ class TestEscapes(WebTest):
             'https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval'
             '#Wilson_score_interval', page)
 
+    def test_the_legend_starts_collapsed_like_the_caveats_beside_it(self) -> None:
+        """Reference material a reader opens when they ask what a figure means, not an explainer held
+        open on every visit — which is how its disclosures came to read as furniture."""
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
+        page = self.page('/escapes')
+        self.assertIn('<details class="section legend-pane">', page)
+        self.assertNotIn('<details class="section legend-pane" open>', page)
+
+    def test_the_compressed_blocks_keep_every_disclosure_they_are_there_for(self) -> None:
+        """The legend and the caveats were cut hard, and these are the claims that may not be cut with
+        them: each is a thing a reader would otherwise get wrong about a figure on the page."""
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
+        page = self.page('/escapes')
+        for disclosure in (
+                'lower bound',
+                'alpha 0.10',
+                'not the rate',
+                'the count pairs either side of the landing',
+                'no rise shown, not no failures',
+                'not the old 50% run share',
+                'Blank is no answer, not zero',
+                'nobody asked, or main ran it no times',
+                'recent_runs is a floor',
+                'limit is per response group',
+                'not clamped to the landing',
+                'only landings pinned from a pull request title',
+                'only tests a bot runs on main in the same configuration',
+                'Undecided convictions are counted above, not dropped',
+                'not a regression count',
+        ):
+            self.assertIn(disclosure, page, disclosure)
+
 
 class EscapeRows(WebTest):
     """A convicted test with a stored verdict, for the three classes below that need a listing to
@@ -1831,15 +1891,15 @@ class TestEscapesOrder(EscapeRows):
     answerable by a plain GET with the script disabled, and survive a hand-edited argument."""
 
     SORTED_HEADER = re.compile(r'<th class="[^"]*\bsorted\b[^"]*"><a[^>]*>([^<]+)')
-    STRENGTH_CELL = re.compile(r'>([\d.]+)%<span class="evidence">')
+    INCREASE_CELL = re.compile(r'>(-?[\d.]+)%<span class="evidence">')
 
     def _three_escapes(self) -> None:
         self._escape(1, 'fast/thin.html', runs_after=100, failed_after=1)
         self._escape(2, 'fast/hard.html', runs_after=10, failed_after=10)
         self._escape(3, 'fast/half.html', runs_after=10, failed_after=5)
 
-    def _strengths(self, page: str) -> list:
-        return [float(figure) for figure in self.STRENGTH_CELL.findall(page)]
+    def _increases(self, page: str) -> list:
+        return [float(figure) for figure in self.INCREASE_CELL.findall(page)]
 
     def _order(self, page: str, *names: str) -> list:
         return [page.index(name) for name in names]
@@ -1850,18 +1910,18 @@ class TestEscapesOrder(EscapeRows):
         self.assertIsNotNone(found, f'no heading offered to sort by {key}')
         return found.group(1).replace('&amp;', '&')
 
-    def test_the_default_order_is_strength_descending(self) -> None:
-        """The explicit replacement for newest-landing-first: the page exists to surface the escapes
-        whose evidence is hardest, and the figure it orders by is the one it prints."""
+    def test_the_default_order_is_the_rate_increase_descending(self) -> None:
+        """The explicit replacement for newest-landing-first: the page exists to surface the landings
+        that worsened a test most, and the figure it orders by is the one it prints."""
         self._three_escapes()
-        strengths = self._strengths(self.page('/escapes'))
-        self.assertEqual(len(strengths), 3)
-        self.assertEqual(strengths, sorted(strengths, reverse=True))
+        increases = self._increases(self.page('/escapes'))
+        self.assertEqual(len(increases), 3)
+        self.assertEqual(increases, sorted(increases, reverse=True))
 
-    def test_the_default_order_marks_the_strength_heading(self) -> None:
+    def test_the_default_order_marks_the_rate_increase_heading(self) -> None:
         self._three_escapes()
         self.assertEqual(set(self.SORTED_HEADER.findall(self.page('/escapes'))),
-                         {'Escape strength'})
+                         {'Rate increase'})
 
     def test_no_sentence_names_the_order_because_the_page_already_shows_it(self) -> None:
         """The order is on the page twice without a paragraph: the sorted column carries an arrow, and
@@ -1873,7 +1933,7 @@ class TestEscapesOrder(EscapeRows):
                     f'/escapes?{ESCAPE_FILTER}=test:has:fast'):
             self.assertNotIn('Ordered by', self.page(url), f'{url} still names its order in prose')
         self.assertRegex(self.page('/escapes'),
-                         r'<th class="sortable numeric sorted">.*?Escape strength'
+                         r'<th class="sortable numeric sorted">.*?Rate increase'
                          r'<span class="arrow">▾</span>')
         counted = self.page(f'/escapes?{ESCAPE_SORT}=runs_after:desc')
         self.assertIn('<option value="runs_after" selected>Runs after landing</option>', counted)
@@ -1889,18 +1949,18 @@ class TestEscapesOrder(EscapeRows):
         self.assertEqual(descending, sorted(descending))
 
     def test_two_sorts_are_a_primary_and_a_secondary_key_in_the_order_written(self) -> None:
-        """Two escapes tie on strength, so only a secondary key can decide between them."""
+        """Two escapes tie on the rate increase, so only a secondary key can decide between them."""
         self._escape(1, 'fast/zzz.html', runs_after=10, failed_after=5)
         self._escape(2, 'fast/aaa.html', runs_after=10, failed_after=5)
-        forwards = self.page(f'/escapes?{ESCAPE_SORT}=strength:desc&{ESCAPE_SORT}=test:asc')
+        forwards = self.page(f'/escapes?{ESCAPE_SORT}=increase:desc&{ESCAPE_SORT}=test:asc')
         self.assertLess(forwards.index('fast/aaa.html'), forwards.index('fast/zzz.html'))
-        backwards = self.page(f'/escapes?{ESCAPE_SORT}=strength:desc&{ESCAPE_SORT}=test:desc')
+        backwards = self.page(f'/escapes?{ESCAPE_SORT}=increase:desc&{ESCAPE_SORT}=test:desc')
         self.assertLess(backwards.index('fast/zzz.html'), backwards.index('fast/aaa.html'))
 
     def test_a_sort_key_that_is_not_a_key_falls_back_to_the_default_and_is_named(self) -> None:
         self._three_escapes()
         page = self.page(f'/escapes?{ESCAPE_SORT}=bogus')
-        self.assertEqual(set(self.SORTED_HEADER.findall(page)), {'Escape strength'})
+        self.assertEqual(set(self.SORTED_HEADER.findall(page)), {'Rate increase'})
         self.assertIn('Ignored 1 filter this page cannot read: bogus', page)
 
     def test_a_category_name_is_not_a_sort_key(self) -> None:
@@ -1908,16 +1968,16 @@ class TestEscapesOrder(EscapeRows):
         self._three_escapes()
         page = self.page(f'/escapes?{ESCAPE_SORT}=verdict:desc')
         self.assertIn('Ignored 1 filter this page cannot read: verdict:desc', page)
-        self.assertEqual(set(self.SORTED_HEADER.findall(page)), {'Escape strength'})
+        self.assertEqual(set(self.SORTED_HEADER.findall(page)), {'Rate increase'})
 
     def test_a_row_with_no_evidence_does_not_outrank_one_with_some(self) -> None:
-        """NO_RUNS has no run after the landing, so its strength is null; sqlite would lead an
+        """NO_RUNS has no run after the landing, so its bound is null; sqlite would lead an
         ascending page with it."""
         self._escape(1, 'fast/none.html', runs_after=0, failed_after=0, verdict=escapes.NO_RUNS)
         self._escape(2, 'fast/some.html', runs_after=10, failed_after=2, verdict=escapes.NO_RUNS)
         for direction in ('asc', 'desc'):
             page = self.page(f'/escapes?verdict={escapes.NO_RUNS}'
-                             f'&{ESCAPE_SORT}=strength:{direction}')
+                             f'&{ESCAPE_SORT}=increase:{direction}')
             self.assertLess(page.index('fast/some.html'), page.index('fast/none.html'), direction)
 
     def test_a_heading_link_returns_the_reader_to_the_table_and_drops_the_page(self) -> None:
@@ -2019,16 +2079,16 @@ class TestEscapesFilters(EscapeRows):
         self.assertIn('value="webgl"', page)
 
     def test_a_filter_on_a_derived_column_narrows_by_the_number_in_the_cell(self) -> None:
-        """The strength column is the registered sqlite function scaled to a percentage, so `at least
-        50` means the 50% a reader can see, and no second copy of the Wilson formula exists to drift
-        from it."""
-        page = self.page(f'/escapes?{ESCAPE_FILTER}=strength:ge:50')
+        """The rate-increase column is the registered sqlite function scaled to a percentage, so `at
+        least 50` means the 50% a reader can see, and no second copy of the Newcombe formula exists to
+        drift from it."""
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=increase:ge:50')
         self.assertIn('fast/webgl/a.html', page)
         self.assertNotIn('fast/forms/b.html', page)
 
     def test_two_filters_both_apply(self) -> None:
         page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:fast'
-                         f'&{ESCAPE_FILTER}=strength:ge:50')
+                         f'&{ESCAPE_FILTER}=increase:ge:50')
         self.assertEqual(self.rows_rendered(page), 1)
         self.assertIn('fast/webgl/a.html', page)
 
@@ -2052,8 +2112,8 @@ class TestEscapesFilters(EscapeRows):
         self.assertIn('Ignored 1 filter this page cannot read: test:gt:5', page)
 
     def test_a_value_that_will_not_coerce_is_ignored_and_named(self) -> None:
-        page = self.page(f'/escapes?{ESCAPE_FILTER}=strength:ge:nearly')
-        self.assertIn('Ignored 1 filter this page cannot read: strength:ge:nearly', page)
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=increase:ge:nearly')
+        self.assertIn('Ignored 1 filter this page cannot read: increase:ge:nearly', page)
 
     def test_a_verdict_outside_the_vocabulary_is_ignored_and_named(self) -> None:
         page = self.page(f'/escapes?{ESCAPE_FILTER}=verdict:eq:ESCAPED_RARELY')
@@ -2283,12 +2343,15 @@ class TestVocabularyLegend(WebTest):
         self.assertIn(str(config.MAX_CLASSIFIABLE_SURFACED_TESTS),
                      false_positive.REASON_DESCRIPTIONS[false_positive.TOO_MANY_SURFACED])
 
-    def test_the_escape_verdict_glosses_name_the_configured_window_and_failure_share(self) -> None:
+    def test_the_escape_verdict_glosses_name_the_configured_window_and_alpha(self) -> None:
         for verdict in (escapes.ESCAPED, escapes.FAILS_ON_MAIN, escapes.CONTAINED, escapes.NO_RUNS,
                        escapes.NO_BASELINE):
             self.assertIn(f'{config.ESCAPE_WINDOW_DAYS} days',
                          escapes.VERDICT_DESCRIPTIONS[verdict])
-        self.assertIn(str(config.ESCAPE_FAILURE_PCT), escapes.VERDICT_DESCRIPTIONS[escapes.ESCAPED])
+        self.assertIn(f'alpha {config.ESCAPE_SIGNIFICANCE_ALPHA:.2f}',
+                      escapes.VERDICT_DESCRIPTIONS[escapes.ESCAPED])
+        self.assertNotIn('strong escape needs',
+                         escapes.VERDICT_DESCRIPTIONS[escapes.ESCAPED])
 
 
 class TestMethodologyDisclosure(WebTest):
@@ -2406,14 +2469,15 @@ class TestEscapesMergedBucket(EscapeRows):
         self.assertNotIn(escapes.FAILS_ON_MAIN, listed)
         self.assertEqual(set(listed), set(escapes.CATEGORIES))
 
-    def test_the_headline_rate_is_taken_over_the_merged_bucket(self) -> None:
-        """The number this page leads with is redefined by the fold, so it has to move with it."""
+    def test_the_headline_reports_the_strong_escapes_beside_the_tests_they_name(self) -> None:
+        """The number this page leads with, and the honest disclosure beside it: all three of these
+        landings measurably worsened a test, on two tests, because one test is convicted twice."""
         self._both_halves()
         self._escape(4, 'fast/contained.html', runs_after=100, failed_after=0,
                      verdict=escapes.CONTAINED)
         page = self.page('/escapes')
         self.assertIn('<span class="value">75%</span>', page)
-        self.assertIn('3 of 4 convictions main answered', page)
+        self.assertIn('3 of 4 convictions main answered, on 2 distinct tests', page)
 
     def test_the_listing_shows_both_halves_under_the_one_category(self) -> None:
         self._both_halves()
@@ -2466,22 +2530,22 @@ class TestEscapesMergedBucket(EscapeRows):
         self.assertEqual(selected.group(1), escapes.ESCAPED)
         self.assertEqual(self.rows_rendered(page), 3)
 
-    def test_both_halves_print_the_strength_the_table_orders_them_by(self) -> None:
+    def test_both_halves_print_the_rate_increase_the_table_orders_them_by(self) -> None:
         """Inside one bucket a dash in a column the page sorts on is an order a reader cannot
         account for, and the already-failing half is now the bulk of that bucket."""
         self._both_halves()
         page = self.page('/escapes')
-        self.assertEqual(len(re.findall(r'>([\d.]+)%<span class="evidence">', page)), 3)
+        self.assertEqual(len(re.findall(r'>(-?[\d.]+)%<span class="evidence">', page)), 3)
 
-    def test_a_category_outside_the_bucket_prints_no_strength_and_does_not_sort_by_it(self) -> None:
-        """Strength is printed only for the verdicts in the merged bucket, so elsewhere it is neither
-        the order nor a heading a reader can click: an arrow over a column of em dashes sorted the
-        rows by a figure that was not on the page."""
+    def test_a_category_outside_the_bucket_prints_no_increase_and_does_not_sort_by_it(self) -> None:
+        """The rate increase is printed only for the verdicts in the merged bucket, so elsewhere it is
+        neither the order nor a heading a reader can click: an arrow over a column of em dashes sorted
+        the rows by a figure that was not on the page."""
         self._escape(1, 'fast/contained.html', runs_after=100, failed_after=0,
                      verdict=escapes.CONTAINED)
         page = self.page(f'/escapes?verdict={escapes.CONTAINED}')
-        self.assertNotRegex(page, r'>[\d.]+%<span class="evidence">')
-        self.assertIn('<th class="numeric">Escape strength</th>', page)
+        self.assertNotRegex(page, r'>-?[\d.]+%<span class="evidence">')
+        self.assertIn('<th class="numeric">Rate increase</th>', page)
         self.assertRegex(page, r'<th class="sortable when sorted">.*?Landed'
                                r'<span class="arrow">▾</span>')
 

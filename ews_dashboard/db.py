@@ -48,9 +48,9 @@ REPORTED_TABLES = (
 def register_functions(connection: sqlite3.Connection) -> None:
     """Register the derived figures a query may order or narrow by, as the Python that computes them.
 
-    This is what lets `ORDER BY escape_strength(...)` and the figure printed in the cell beside it be
-    one definition rather than two: the alternative is a stored column or the Wilson formula
-    re-spelled in SQL, either of which can drift from `strength_for_counts` and disagree with the
+    This is what lets `ORDER BY escape_rate_increase(...)` and the figure printed in the cell beside it
+    be one definition rather than two: the alternative is a stored column or the Newcombe formula
+    re-spelled in SQL, either of which can drift from `rate_increase_for_counts` and disagree with the
     counts shown next to it.
 
     `analysis.escapes` is imported here rather than at module scope. Checked, not assumed: it imports

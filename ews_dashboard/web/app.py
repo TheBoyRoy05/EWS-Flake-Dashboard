@@ -41,18 +41,18 @@ SUITE_CHOICES = tuple(suite.name for suite in suites.SUITES)
 # The column a page of convicted tests reads in when a request asked for no order of its own.
 DEFAULT_SORT = 'convictions'
 
-# The column a page of escape convictions reads in when a request asked for no order of its own:
-# hardest-evidenced escape first, which is what the page exists to surface, rather than the
+# The column a page of escape convictions reads in when a request asked for no order of its own: the
+# landings that worsened a test most, bounded, which is what the page exists to surface rather than the
 # newest landing it used to hard-code. Derived on read through the registered sqlite function, so the
 # order and the printed figure are one definition.
-ESCAPES_DEFAULT_SORT = 'strength'
+ESCAPES_DEFAULT_SORT = 'increase'
 
-# What those pages read in instead on a category that prints no strength figure. Strength is printed
-# only for the verdicts in the merged ESCAPED bucket: a CONTAINED row has no failures after the
-# landing so every bound is 0, and a NO_RUNS or TREE_DIVERGED row has no runs to take a bound from at
-# all. Ordering those by strength put an arrow on a column of em dashes and sorted the rows by a
-# figure the reader could not see, so they read by landing time, which they do print.
-ESCAPES_WITHOUT_STRENGTH_SORT = 'landed'
+# What those pages read in instead on a category that prints no rate increase. The increase is printed
+# only for the verdicts in the merged ESCAPED bucket: a CONTAINED row has no failures after the landing,
+# and a NO_RUNS or TREE_DIVERGED row has no runs on one side to take a bound from at all. Ordering those
+# by the increase put an arrow on a column of em dashes and sorted the rows by a figure the reader could
+# not see, so they read by landing time, which they do print.
+ESCAPES_WITHOUT_INCREASE_SORT = 'landed'
 
 # Which page of the escapes listing to show. Named `page` rather than an offset because it is a URL a
 # reader can read, and the offset is derived from it against the page size the query actually used.
@@ -702,16 +702,19 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
     scope = _scope(open_connection, window)
     verdict_shown = escapes.category_of(_chosen('verdict', escapes.VERDICTS, escapes.ESCAPED))
     asked = filters.requested(_canonical_filter_arguments(filters.ESCAPES), filters.ESCAPES)
-    shows_strength = verdict_shown == escapes.ESCAPED
+    shows_increase = verdict_shown == escapes.ESCAPED
     primary = _primary_sort(filters.ESCAPES, asked.sort_keys,
-                            ESCAPES_DEFAULT_SORT if shows_strength else ESCAPES_WITHOUT_STRENGTH_SORT)
+                            ESCAPES_DEFAULT_SORT if shows_increase
+                            else ESCAPES_WITHOUT_INCREASE_SORT)
     listed = escapes.convictions(open_connection, window.since, window.until,
                                  escapes.category_verdicts(verdict_shown),
                                  suite=scope.suite, builders=scope.builders,
                                  page=_page_asked_for(), conditions=asked.conditions,
-                                 sort_keys=_escape_order(asked.sort_keys, shows_strength))
+                                 sort_keys=_escape_order(asked.sort_keys, shows_increase))
     counted = escapes.tally(open_connection, window.since, window.until,
                             suite=scope.suite, builders=scope.builders)
+    subcategories = escapes.escape_subcategories(open_connection, window.since, window.until,
+                                                 suite=scope.suite, builders=scope.builders)
     return dict(
         window=window,
         window_choices=WINDOW_CHOICES,
@@ -724,18 +727,17 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
         category_counts=counted.by_category,
         escaped_verdict=escapes.ESCAPED,
         escape_verdicts=escapes.MERGED_ESCAPE_VERDICTS,
-        subcategories=escapes.escape_subcategories(open_connection, window.since, window.until,
-                                                   suite=scope.suite, builders=scope.builders),
+        subcategories=subcategories,
         listed=listed,
         verdict_shown=verdict_shown,
         sentence=escapes.sentence,
         verdict_descriptions=escapes.VERDICT_DESCRIPTIONS,
         categories=escapes.CATEGORIES,
         window_days=config.ESCAPE_WINDOW_DAYS,
-        failure_pct=config.ESCAPE_FAILURE_PCT,
+        significance_alpha=config.ESCAPE_SIGNIFICANCE_ALPHA,
         currency_days=config.CURRENCY_DAYS,
         sort=primary.column.name,
-        shows_strength=shows_strength,
+        shows_increase=shows_increase,
         descending=primary.descending,
         descending_first=filters.ESCAPES.descending_first,
         sort_label=primary.column.label,
@@ -759,14 +761,14 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
 
 FALLBACK_SORT = ((DEFAULT_SORT, True), ('last_seen', True))
 
-# What a page of escape convictions falls back on: the strongest escapes first, then the most recent
-# landing among rows that tie on strength. `order_by` drops a fallback key that repeats a column the
-# request already ordered on, so asking for `strength:asc` does not get strength twice.
+# What a page of escape convictions falls back on: the landings that measurably worsened a test most
+# first, then the most recent landing among rows that tie. `order_by` drops a fallback key that repeats
+# a column the request already ordered on, so asking for `increase:asc` does not get it twice.
 ESCAPES_FALLBACK_SORT = ((ESCAPES_DEFAULT_SORT, True), ('landed', True))
 
-# The same, for a category that prints no strength figure: landing time alone, since a strength key
-# there would order the rows by a column of em dashes.
-ESCAPES_FALLBACK_SORT_WITHOUT_STRENGTH = ((ESCAPES_WITHOUT_STRENGTH_SORT, True),)
+# The same, for a category that prints no rate increase: landing time alone, since an increase key there
+# would order the rows by a column of em dashes.
+ESCAPES_FALLBACK_SORT_WITHOUT_INCREASE = ((ESCAPES_WITHOUT_INCREASE_SORT, True),)
 
 
 def _primary_sort(table: filters.Table, keys: tuple, default: str) -> filters.SortKey:
@@ -788,18 +790,18 @@ def _test_order(keys: tuple) -> tuple:
     return tuple(keys) + filters.sort_keys(filters.TESTS, FALLBACK_SORT)
 
 
-def _escape_order(keys: tuple, shows_strength: bool = True) -> tuple:
-    """The sort keys behind a page of escape convictions: what the request asked for, then strength
-    and landing time, then the tiebreak `filters` adds.
+def _escape_order(keys: tuple, shows_increase: bool = True) -> tuple:
+    """The sort keys behind a page of escape convictions: what the request asked for, then the rate
+    increase and landing time, then the tiebreak `filters` adds.
 
-    A category that prints no strength figure falls back on landing time alone, so its rows are never
+    A category that prints no rate increase falls back on landing time alone, so its rows are never
     ordered by a bound the table renders as an em dash.
 
     The tiebreak is not decoration here the way it can look on an uncapped table: this listing pages
     with LIMIT/OFFSET, and two queries that break a tie differently would drop a row from one page and
     repeat it on the next.
     """
-    fallback = ESCAPES_FALLBACK_SORT if shows_strength else ESCAPES_FALLBACK_SORT_WITHOUT_STRENGTH
+    fallback = ESCAPES_FALLBACK_SORT if shows_increase else ESCAPES_FALLBACK_SORT_WITHOUT_INCREASE
     return tuple(keys) + filters.sort_keys(filters.ESCAPES, fallback)
 
 

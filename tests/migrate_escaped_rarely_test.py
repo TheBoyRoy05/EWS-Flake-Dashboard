@@ -121,8 +121,10 @@ class TestMigrate(fixtures.DatabaseTest):
             'SELECT * FROM escape_verdicts WHERE build_id = ?', (build_id,),
         ).fetchone()
         self.assertEqual(row['verdict'], escapes.ESCAPED)
-        self.assertEqual(escapes.rarity_for_counts(row['runs_after'], row['failed_after']),
-                         escapes.RARE)
+        self.assertEqual(
+            escapes.significance_for_counts(row['runs_before'], row['failed_before'],
+                                            row['runs_after'], row['failed_after']),
+            escapes.NOT_SIGNIFICANT)
         self.assertEqual(
             (row['runs_before'], row['failed_before'], row['runs_after'], row['failed_after']),
             (152, 0, 96, 1),

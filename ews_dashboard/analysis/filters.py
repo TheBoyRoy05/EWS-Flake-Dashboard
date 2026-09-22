@@ -210,10 +210,10 @@ class Column:
     using the alias, which the page's own query does select.
 
     `nulls_last` is for a column whose NULL means no evidence was gathered rather than a low value —
-    a strength over zero runs, a damage nobody has checked. sqlite sorts NULL first ascending, so
-    without it an ascending page leads with the rows that answer nothing; with it they sort last in
-    both directions, because a row with no evidence must not outrank one that has some whichever way
-    a reader reads the column.
+    a rate increase with nothing on one side of the landing, a damage nobody has checked. sqlite sorts
+    NULL first ascending, so without it an ascending page leads with the rows that answer nothing; with
+    it they sort last in both directions, because a row with no evidence must not outrank one that has
+    some whichever way a reader reads the column.
     """
 
     name: str
@@ -304,10 +304,10 @@ TESTS = _table(
 # `descending_first` follows what a column is read for: a rate, a count and a time are being asked
 # "which is worst" so they descend first, and a test name is being looked up so it ascends first.
 #
-# Strength and damage are percentages rather than fractions, so that the number a reader filters
+# Rate increase and damage are percentages rather than fractions, so that the number a reader filters
 # against is the number the page prints ("at least 50" beside a cell reading 50%). Both are the
-# registered sqlite function and NOT a formula re-spelled here: two definitions of strength that can
-# drift is exactly what deriving it on read exists to prevent.
+# registered sqlite function and NOT a formula re-spelled here: two definitions of the same figure that
+# can drift is exactly what deriving it on read exists to prevent.
 ESCAPES = _table(
     'escapes',
     # The primary key of escape_verdicts, so every page of every order is a total order.
@@ -320,8 +320,9 @@ ESCAPES = _table(
         Column('verdict', 'What main said', 'outcome.verdict', ENUM,
                vocabulary=config.ESCAPE_VERDICTS, sortable=False, descending_first=False),
         Column('landed', 'Landed', 'outcome.landed_at', TIMESTAMP, nulls_last=True),
-        Column('strength', 'Escape strength (%)',
-               f'{config.ESCAPE_STRENGTH_FUNCTION}(outcome.runs_after, outcome.failed_after) * 100',
+        Column('increase', 'Rate increase (%)',
+               f'{config.ESCAPE_INCREASE_FUNCTION}(outcome.runs_before, outcome.failed_before, '
+               'outcome.runs_after, outcome.failed_after) * 100',
                INTEGER, nulls_last=True),
         Column('damage', 'Current damage (%)',
                f'{config.ESCAPE_DAMAGE_FUNCTION}(outcome.recent_runs, outcome.recent_failed) * 100',

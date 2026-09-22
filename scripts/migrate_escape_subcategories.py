@@ -14,8 +14,8 @@ ESCAPED_RARELY never reached a committed schema.sql — no CHECK constraint this
 declared has permitted it — so the fold below has nothing to do against a real database. It stays
 in because it costs nothing to leave in and because ESCAPED_RARELY and ESCAPED were always the same
 answer to the one question a verdict here answers: whether main failed the test after the landing
-without having failed it before. The rate is read off `runs_after` and `failed_after` wherever an
-escape is shown, so a rarity beside the counts can never disagree with them.
+without having failed it before. How hard the test failed is read off the four stored counts wherever an
+escape is shown, so no figure beside the counts can disagree with them.
 
 The table is rebuilt rather than altered because db.initialize() creates it with `CREATE TABLE IF NOT
 EXISTS`, so an edit to schema.sql never reaches a database that already has one — neither the current

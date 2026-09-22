@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import statistics
 import time
 import unittest
 from typing import Optional
@@ -51,8 +52,9 @@ class TestDecide(fixtures.DatabaseTest):
         verdict = escapes.decide(_runs(0, 152, LANDED_AT - escapes.ESCAPE_WINDOW_SECONDS),
                                  _runs(1, 96, LANDED_AT))
         self.assertEqual(verdict.verdict, escapes.ESCAPED)
-        self.assertEqual(escapes.rarity_for_counts(verdict.runs_after, verdict.failed_after),
-                         escapes.RARE)
+        self.assertEqual(escapes.significance_for_counts(152, 0, verdict.runs_after,
+                                                         verdict.failed_after),
+                         escapes.NOT_SIGNIFICANT)
         self.assertEqual((verdict.runs_before, verdict.failed_before), (152, 0))
         self.assertEqual((verdict.runs_after, verdict.failed_after), (96, 1))
 
@@ -74,24 +76,28 @@ class TestDecide(fixtures.DatabaseTest):
         self.assertNotIn(escapes.ESCAPED, escapes.UNDECIDED_VERDICTS)
         self.assertIn(escapes.ESCAPED, escapes.VERDICTS)
 
-    def test_how_rarely_a_test_failed_is_no_verdict_of_its_own(self) -> None:
-        """One stored answer, with the rate read off the counts beside it: a second verdict name is
-        what let a stored rarity disagree with the runs it was taken from."""
+    def test_how_hard_a_test_failed_is_no_verdict_of_its_own(self) -> None:
+        """One stored answer, with the bound read off the counts beside it: a second verdict name is
+        what let a stored grade disagree with the runs it was taken from."""
         self.assertEqual(len([verdict for verdict in escapes.VERDICTS if 'ESCAPE' in verdict]), 1)
         self.assertEqual(sorted(escapes.VERDICT_DESCRIPTIONS), sorted(escapes.VERDICTS))
 
-    def test_a_rate_exactly_at_the_threshold_is_a_strong_escape(self) -> None:
-        """The boundary belongs to the strong side, as the sentence a reader gets says it does."""
-        self.assertEqual(escapes.rarity_for_counts(4, 2), escapes.STRONG)
-        self.assertEqual(escapes.rarity_for_counts(96, 47), escapes.RARE)
+    def test_a_bound_of_exactly_zero_is_not_significant(self) -> None:
+        """The boundary belongs to the not-significant side: the page's claim is that the bound clears
+        zero, and a bound sitting on zero has not cleared it."""
+        self.assertEqual(escapes.significance_for_counts(4, 0, 4, 4), escapes.SIGNIFICANT)
+        self.assertEqual(escapes.significance_for_counts(96, 48, 96, 47),
+                         escapes.NOT_SIGNIFICANT)
+        self.assertLessEqual(escapes.rate_increase_for_counts(96, 48, 96, 47), 0.0)
 
     def test_a_test_failing_less_often_than_the_threshold_over_a_clean_baseline_escaped(self) -> None:
         watched = [fixtures.run('TEXT', commit_at=LANDED_AT)]
         watched += [fixtures.run(commit_at=LANDED_AT + minute * 60) for minute in range(1, 5)]
         verdict = escapes.decide([fixtures.run(commit_at=LANDED_AT - DAY)], watched)
         self.assertEqual(verdict.verdict, escapes.ESCAPED)
-        self.assertEqual(escapes.rarity_for_counts(verdict.runs_after, verdict.failed_after),
-                         escapes.RARE)
+        self.assertEqual(escapes.significance_for_counts(1, 0, verdict.runs_after,
+                                                         verdict.failed_after),
+                         escapes.NOT_SIGNIFICANT)
         self.assertEqual((verdict.runs_after, verdict.failed_after), (5, 1))
 
     def test_a_clean_window_after_the_landing_is_contained(self) -> None:
@@ -160,23 +166,52 @@ class TestDecide(fixtures.DatabaseTest):
         self.assertEqual(verdict.verdict, escapes.CONTAINED)
 
 
-class TestStrength(unittest.TestCase):
-    """The Wilson-bounded rate `strength_for_counts` ranks escapes by, ahead of the raw share."""
+class TestRateIncrease(unittest.TestCase):
+    """The Newcombe square-and-add bound `rate_increase_for_counts` ranks escapes by, which reads the
+    baseline as well as the window after the landing."""
+
+    def test_the_z_is_derived_from_the_one_configured_alpha(self) -> None:
+        """Not a written-down constant: a second copy of the significance level is how a page ends up
+        printing one alpha and testing another."""
+        self.assertAlmostEqual(
+            escapes.SIGNIFICANCE_Z,
+            statistics.NormalDist().inv_cdf(1 - config.ESCAPE_SIGNIFICANCE_ALPHA), places=12)
+        self.assertAlmostEqual(escapes.SIGNIFICANCE_Z, 1.2816, places=4)
 
     def test_no_runs_after_the_landing_answers_nothing(self) -> None:
-        self.assertIsNone(escapes.strength_for_counts(0, 0))
+        self.assertIsNone(escapes.rate_increase_for_counts(94, 0, 0, 0))
+        self.assertIsNone(escapes.significance_for_counts(94, 0, 0, 0))
 
-    def test_nine_of_fourteen_is_the_bounded_rate_not_the_raw_one(self) -> None:
-        self.assertAlmostEqual(escapes.strength_for_counts(14, 9), 0.426, places=3)
+    def test_no_runs_before_the_landing_answers_nothing_either(self) -> None:
+        """No baseline is no change to measure. A 0 here would read as a landing shown to have
+        changed nothing, which is the opposite of what an absent baseline says."""
+        self.assertIsNone(escapes.rate_increase_for_counts(0, 0, 127, 56))
+        self.assertIsNone(escapes.significance_for_counts(0, 0, 127, 56))
 
-    def test_no_failures_bounds_to_zero(self) -> None:
-        self.assertEqual(escapes.strength_for_counts(8, 0), 0.0)
+    def test_the_bound_is_below_the_difference_in_the_raw_rates(self) -> None:
+        """A lower bound and not the difference itself: 0 of 94 to 56 of 127 is a 44.1-point rise in
+        the raw rates, and the bound keeps only what 221 runs will support."""
+        bound = escapes.rate_increase_for_counts(94, 0, 127, 56)
+        self.assertAlmostEqual(bound, 0.38299, places=4)
+        self.assertLess(bound, 56 / 127 - 0)
 
-    def test_the_bound_orders_thin_and_thick_evidence_the_raw_rate_gets_backwards(self) -> None:
-        """1 failure in 8 runs is 12.5% raw against 7 in 98 at 7.1% raw, which ranks the thin evidence
-        above the thick evidence; the bound sinks the thin one below the thick one instead."""
-        thin = escapes.strength_for_counts(8, 1)
-        thick = escapes.strength_for_counts(98, 7)
+    def test_the_landing_the_fifty_percent_rule_dismissed_is_significant(self) -> None:
+        """The population this replaced the rule for: never failed in 94 runs, then 56 of 127, called
+        RARE because 44.1 is under 50 while the worsening is the clearest on the page."""
+        self.assertEqual(escapes.significance_for_counts(94, 0, 127, 56), escapes.SIGNIFICANT)
+
+    def test_a_baseline_already_failing_at_the_same_rate_is_not_significant(self) -> None:
+        """What the share of post-landing runs could not see at all: 88 of 100 after the landing is a
+        severe test and not a severe landing when main was failing it 88 of 100 before."""
+        self.assertEqual(escapes.significance_for_counts(100, 88, 100, 90),
+                         escapes.NOT_SIGNIFICANT)
+        self.assertLess(escapes.rate_increase_for_counts(100, 88, 100, 90), 0)
+
+    def test_the_bound_orders_thin_and_thick_evidence_the_raw_rise_gets_backwards(self) -> None:
+        """Both landings raise the rate to the same place from the same clean baseline; only the number
+        of runs behind them differs, and the bound is what puts the thick evidence first."""
+        thin = escapes.rate_increase_for_counts(4, 0, 4, 2)
+        thick = escapes.rate_increase_for_counts(400, 0, 400, 200)
         self.assertLess(thin, thick)
 
 
@@ -352,9 +387,18 @@ class TestSubcategories(fixtures.DatabaseTest):
             (split.still_failing, split.recovered, split.not_run_lately, split.unchecked),
             (1, 1, 1, 1),
         )
-        self.assertEqual((split.strong, split.rare), (1, 3))
+        self.assertEqual((split.significant, split.not_significant), (3, 1))
         self.assertEqual(split.total, 4)
-        self.assertEqual(split.rate_total, split.total)
+        self.assertEqual(split.significance_total, split.total)
+
+    def test_the_significance_split_reads_the_baseline_and_not_the_share_of_runs(self) -> None:
+        """2 of 40 failing is 5%, which the deleted 50% rule called a thin escape and this calls a
+        measurable rise, because the baseline it is measured against is 0 of 152."""
+        self._escape(1, runs_after=40, failed_after=2)
+        self._escape(2, runs_after=96, failed_after=1)
+        split = self._subcategories()
+        self.assertEqual((split.significant, split.not_significant), (1, 1))
+        self.assertEqual(split.significant_tests, 1)
 
     def test_an_escape_nothing_asked_about_is_neither_still_failing_nor_recovered(self) -> None:
         self._escape(1, runs_after=96, failed_after=1)
@@ -375,12 +419,13 @@ class TestSubcategories(fixtures.DatabaseTest):
             (0, 0, 1, 0),
         )
 
-    def test_no_escape_can_fall_outside_the_rate_split(self) -> None:
-        """An ESCAPED row with no run after the landing would be counted by the currency split and by
-        neither rate bucket; `verdict_for_counts` cannot produce one, which is what makes the two
-        rate buckets a partition rather than a pair of filters."""
+    def test_no_escape_can_fall_outside_the_significance_split(self) -> None:
+        """A row with no run on one side of the landing would be counted by the currency split and by
+        neither significance bucket; `verdict_for_counts` cannot produce one in this bucket, which is
+        what makes the two halves a partition rather than a pair of filters."""
         self.assertEqual(escapes.verdict_for_counts(152, 0, 0, 0), escapes.NO_RUNS)
-        self.assertIsNotNone(escapes.rarity_for_counts(1, 1))
+        self.assertEqual(escapes.verdict_for_counts(0, 0, 96, 1), escapes.NO_BASELINE)
+        self.assertIsNotNone(escapes.significance_for_counts(1, 0, 1, 1))
 
     def test_no_verdict_outside_the_merged_bucket_is_counted_in_the_split(self) -> None:
         """CONTAINED is not in the bucket the splits divide; FAILS_ON_MAIN is, since it is the
@@ -817,20 +862,26 @@ class TestSentence(fixtures.DatabaseTest):
         self.assertIn(f'landed as {"b" * 8}', sentence)
 
     def test_an_escaped_verdict_says_main_had_never_failed_it_before(self) -> None:
-        self.assertIn(f'failed it 4 of 6 runs after the landing, at or above the '
-                      f'{config.ESCAPE_FAILURE_PCT}% a strong escape needs, having never failed it '
+        self.assertIn('failed it 4 of 6 runs after the landing, having never failed it '
                       'in the 4 runs before.',
                       _prose(escapes.sentence(_conviction(escapes.ESCAPED, failed_after=4))))
 
-    def test_an_escape_on_few_failures_names_the_low_rate_as_the_reason_for_caution(self) -> None:
+    def test_an_escaped_verdict_says_whether_the_landing_measurably_worsened_it(self) -> None:
+        """The clause that replaced the share-of-runs one, which said nothing about the baseline the
+        verdict itself was decided on."""
+        self.assertIn('The landing measurably worsened it.',
+                      _prose(escapes.sentence(_conviction(escapes.ESCAPED, runs_before=94,
+                                                          failed_before=0, runs_after=127,
+                                                          failed_after=56))))
+
+    def test_an_escape_on_few_failures_says_the_worsening_was_not_measurable(self) -> None:
         sentence = _prose(escapes.sentence(_conviction(escapes.ESCAPED, runs_before=152,
                                                        failed_before=0, runs_after=96,
                                                        failed_after=1)))
-        self.assertIn(f'failed it 1 of 96 runs after the landing, below the '
-                      f'{config.ESCAPE_FAILURE_PCT}% a strong escape needs, so the escape rests on '
-                      'few failures, having never failed it in the 152 runs before', sentence)
-        self.assertIn(f'below the {config.ESCAPE_FAILURE_PCT}% a strong escape needs', sentence)
-        self.assertIn('rests on few failures', sentence)
+        self.assertIn('failed it 1 of 96 runs after the landing, having never failed it in the '
+                      '152 runs before', sentence)
+        self.assertIn('The landing did not measurably worsen it.', sentence)
+        self.assertNotIn('a strong escape needs', sentence)
 
     def test_an_escape_main_is_still_failing_says_so_with_the_recent_counts(self) -> None:
         sentence = escapes.sentence(_conviction(escapes.ESCAPED, recent_runs=12, recent_failed=9,
@@ -986,7 +1037,7 @@ class TestConvictions(fixtures.DatabaseTest):
         self.assertIsNone(listed[0].landed_at)
         self.assertEqual((listed[0].runs_after, listed[0].failed_after), (6, 2))
 
-    def test_strength_and_damage_read_through_the_stored_counts(self) -> None:
+    def test_the_rate_increase_and_damage_read_through_the_stored_counts(self) -> None:
         build_id = self._convict(1, TEST, escapes.ESCAPED, pr_id=1)
         with self.connection:
             self.connection.execute(
@@ -995,7 +1046,10 @@ class TestConvictions(fixtures.DatabaseTest):
                 (40, 3, LANDED_AT, build_id, TEST),
             )
         listed = self._convictions(escapes.ESCAPED)
-        self.assertAlmostEqual(listed[0].strength, 0.11727270780688966, places=9)
+        self.assertAlmostEqual(listed[0].rate_increase,
+                               escapes.rate_increase_for_counts(4, 0, 6, 2), places=12)
+        self.assertLess(listed[0].rate_increase, 0.0)
+        self.assertFalse(listed[0].significant)
         self.assertEqual(listed[0].damage, 0.075)
 
 
@@ -1082,9 +1136,9 @@ class TestStoredLandingTime(fixtures.DatabaseTest):
 class TestListingOrder(fixtures.DatabaseTest):
     """What `convictions` orders by, and what it does with a row that gathered no evidence.
 
-    The strength a page sorts by is the one it prints, because both go through
-    `strength_for_counts` — the sqlite function `db.connect` registers — rather than through a stored
-    column or the formula re-spelled in SQL.
+    The rate increase a page sorts by is the one it prints, because both go through
+    `rate_increase_for_counts` — the sqlite function `db.connect` registers — rather than through a
+    stored column or the formula re-spelled in SQL.
     """
 
     def _convict(self, number: int, test_name: str, verdict: str, runs_after: int,
@@ -1118,21 +1172,22 @@ class TestListingOrder(fixtures.DatabaseTest):
         figure it did not sort by."""
         self._convict(1, TEST, escapes.ESCAPED, runs_after=8, failed_after=1)
         row = self.connection.execute(
-            f'SELECT {config.ESCAPE_STRENGTH_FUNCTION}(runs_after, failed_after) AS strength, '
+            f'SELECT {config.ESCAPE_INCREASE_FUNCTION}(runs_before, failed_before, runs_after, '
+            'failed_after) AS increase, '
             f'{config.ESCAPE_DAMAGE_FUNCTION}(recent_runs, recent_failed) AS damage '
             'FROM escape_verdicts').fetchone()
         listed = self._listed(escapes.ESCAPED).convictions[0]
-        self.assertAlmostEqual(row['strength'], listed.strength, places=12)
+        self.assertAlmostEqual(row['increase'], listed.rate_increase, places=12)
         self.assertIsNone(row['damage'])
         self.assertIsNone(listed.damage)
 
-    def test_ordering_by_strength_puts_the_hardest_evidenced_escape_first(self) -> None:
+    def test_ordering_by_the_rate_increase_puts_the_worst_landing_first(self) -> None:
         """Which is what the page asks for by default — the default itself lives in the route, the
         way the convicted-tests table's does, so here it is the keys that are passed in."""
         self._convict(1, 'fast/thin.html', escapes.ESCAPED, runs_after=100, failed_after=1)
         self._convict(2, 'fast/hard.html', escapes.ESCAPED, runs_after=10, failed_after=10)
         self._convict(3, 'fast/half.html', escapes.ESCAPED, runs_after=10, failed_after=5)
-        keys = filters.sort_keys(filters.ESCAPES, (('strength', True),))
+        keys = filters.sort_keys(filters.ESCAPES, (('increase', True),))
         self.assertEqual(self._names(escapes.ESCAPED, sort_keys=keys),
                          ['fast/hard.html', 'fast/half.html', 'fast/thin.html'])
 
@@ -1150,13 +1205,13 @@ class TestListingOrder(fixtures.DatabaseTest):
         self.assertEqual(self._names(escapes.ESCAPED, sort_keys=ascending),
                          ['fast/aaa.html', 'fast/zzz.html'])
 
-    def test_a_row_with_no_evidence_sorts_last_whichever_way_strength_is_read(self) -> None:
-        """NO_RUNS stores no run after the landing, so its strength is None: sqlite would lead an
+    def test_a_row_with_no_evidence_sorts_last_whichever_way_the_increase_is_read(self) -> None:
+        """NO_RUNS stores no run after the landing, so its bound is None: sqlite would lead an
         ascending page with it, and a row that answers nothing must not outrank one that does."""
         self._convict(1, 'fast/none.html', escapes.NO_RUNS, runs_after=0, failed_after=0)
         self._convict(2, 'fast/some.html', escapes.NO_RUNS, runs_after=10, failed_after=2)
         for descending in (True, False):
-            keys = filters.sort_keys(filters.ESCAPES, (('strength', descending),))
+            keys = filters.sort_keys(filters.ESCAPES, (('increase', descending),))
             self.assertEqual(self._names(escapes.NO_RUNS, sort_keys=keys),
                              ['fast/some.html', 'fast/none.html'], descending)
 
@@ -1182,7 +1237,7 @@ class TestListingOrder(fixtures.DatabaseTest):
         sees in the cell."""
         self._convict(1, 'fast/hard.html', escapes.ESCAPED, runs_after=100, failed_after=95)
         self._convict(2, 'fast/thin.html', escapes.ESCAPED, runs_after=100, failed_after=1)
-        conditions = filters.parse(filters.ESCAPES, (('strength', 'ge', '50'),))
+        conditions = filters.parse(filters.ESCAPES, (('increase', 'ge', '50'),))
         self.assertEqual([one.test_name for one in
                           self._listed(escapes.ESCAPED, conditions=conditions).convictions],
                          ['fast/hard.html'])
@@ -1385,7 +1440,7 @@ class TestMergedEscapeCategory(fixtures.DatabaseTest):
         self.assertEqual((split.baseline_clean, split.baseline_failing), (1, 2))
         self.assertEqual(split.baseline_total, 3)
         self.assertEqual(split.baseline_total, split.total)
-        self.assertEqual(split.baseline_total, split.rate_total)
+        self.assertEqual(split.baseline_total, split.significance_total)
 
     def test_every_split_is_counted_over_the_whole_merged_bucket(self) -> None:
         """A split counted over less than the bucket above it would print partitions of a number that
@@ -1397,7 +1452,7 @@ class TestMergedEscapeCategory(fixtures.DatabaseTest):
 
         self.assertEqual((split.still_failing, split.unchecked), (1, 1))
         self.assertEqual(split.total, 2)
-        self.assertEqual(split.rate_total, 2)
+        self.assertEqual(split.significance_total, 2)
 
     def test_the_distinct_test_count_is_the_tests_and_not_the_convictions(self) -> None:
         """One landed regression makes a fresh conviction on every later pull request whose build

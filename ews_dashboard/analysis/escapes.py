@@ -34,11 +34,10 @@ is still reachable on its own through a `verdict` filter on the listing, which n
 name.
 
 Three further things are read off a bucket's stored counts rather than stored beside them — how many
-distinct tests its convictions name, whether the share of failing runs after the landing is what a
-strong escape needs or thinner than that, and whether main is still failing the test now. The
-distinct-test count is shown beside the conviction count because one landed regression makes a new
-conviction on every later pull request whose build trips the same test, so the convictions count more
-loudly than the regressions behind them do.
+distinct tests its convictions name, whether the landing measurably worsened the test, and whether
+main is still failing the test now. The distinct-test count is shown beside the conviction count
+because one landed regression makes a new conviction on every later pull request whose build trips
+the same test, so the convictions count more loudly than the regressions behind them do.
 
 Whether main is still failing an escaped test cannot be read from the window either side of the
 landing however wide it is, so the assess pass asks a second, fresh question over the last
@@ -61,6 +60,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import statistics
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -121,10 +121,11 @@ def category_of(verdict: str) -> str:
     return verdict
 
 
-# How hard an escaped test failed after the landing. Derived from the stored counts on every read
-# rather than stored alongside them, so it can never contradict the numbers beside it.
-STRONG = 'strong'
-RARE = 'rare'
+# Whether the landing measurably worsened the test, and a partition of the merged escape bucket.
+# Derived from the four stored counts on every read rather than stored alongside them, so it can never
+# contradict the numbers beside it.
+SIGNIFICANT = 'significant'
+NOT_SIGNIFICANT = 'not_significant'
 
 # What main is doing with an escaped test now, and a partition of the escapes: exactly one of these
 # holds for any row. Neither UNCHECKED nor NOT_RUN_LATELY is another way of saying recovered — nobody
@@ -150,9 +151,12 @@ VERDICT_DESCRIPTIONS = {
             'conviction excused a failure main went on to have. Whether main had also failed it '
             'before the landing is the split under this bucket, not a bucket of its own: one '
             'failure in a long clean baseline was enough to separate the two, and it separated '
-            'them by nothing a reader is looking for. At least '
-            f'{config.ESCAPE_FAILURE_PCT}% of the runs after the landing failing makes it a strong '
-            'escape; below that the escape rests on few failures.',
+            'them by nothing a reader is looking for. Whether the landing measurably worsened the '
+            'test is the other split: strong means the bounded rate increase either side of it '
+            'clears zero at alpha '
+            f'{config.ESCAPE_SIGNIFICANCE_ALPHA:.2f}, and no longer means a share of the runs after '
+            f'the landing failing. The {config.ESCAPE_WINDOW_DAYS} days either side are what the '
+            'counts were taken over.',
     FAILS_ON_MAIN: f'Main was already failing this in the {config.ESCAPE_WINDOW_DAYS} days before '
                    'the change landed, and failed it after the landing too. Stored apart from '
                    'ESCAPED and shown with it: this is the already-failing half of that bucket.',
@@ -185,39 +189,76 @@ ESCAPES_LISTED = 200
 WINDOW = 'build.started_at >= :since AND build.started_at < :until'
 
 
-def rarity_for_counts(runs_after: int, failed_after: int) -> Optional[str]:
-    """Whether an escape's failures after the landing are the share a strong escape needs.
+# The one-sided normal deviate the bound below is taken at, derived from the single alpha in `config`
+# rather than written down beside it: a hard-coded z is a second place the significance level lives,
+# and the two of them drifted apart is exactly how a page ends up printing one level and testing
+# another. `statistics` is standard library, so this costs the dashboard no dependency.
+SIGNIFICANCE_Z = statistics.NormalDist().inv_cdf(1 - config.ESCAPE_SIGNIFICANCE_ALPHA)
 
-    None when nothing ran after the landing, which no escape reaches: `verdict_for_counts` sends a
-    conviction with no run after the landing to NO_RUNS before the baseline is ever consulted, so
-    every ESCAPED row is either STRONG or RARE and the two of them are the whole of the bucket.
+
+def _wilson_interval(runs: int, failed: int) -> 'tuple[float, float]':
+    """The Wilson score interval on `failed / runs`, at the page's one significance level.
+
+    Both ends come back together because the increase bound needs one end of each of two intervals and
+    must take them at the same z: two levels either side of a subtraction would be a bound at neither.
+    Clamped to [0, 1], which the score interval can exceed at the extremes.
     """
-    if not runs_after:
-        return None
-    if 100.0 * failed_after / runs_after >= config.ESCAPE_FAILURE_PCT:
-        return STRONG
-    return RARE
+    n = float(runs)
+    p = failed / n
+    z = SIGNIFICANCE_Z
+    denominator = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denominator
+    margin = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denominator
+    return max(0.0, centre - margin), min(1.0, centre + margin)
 
 
-WILSON_Z = 1.6449
+def rate_increase_for_counts(runs_before: int, failed_before: int, runs_after: int,
+                             failed_after: int) -> Optional[float]:
+    """A lower bound on how much more often main fails the test after the landing, as a fraction.
 
+    Newcombe's square-and-add (MOVER-R) bound on `p_after - p_before`: the distance from each rate to
+    the end of its own Wilson interval that faces the other, combined in quadrature.
 
-def strength_for_counts(runs_after: int, failed_after: int) -> Optional[float]:
-    """The lower end of the 90% Wilson score interval on `failed_after / runs_after`, as a fraction.
+        lower = (p_after - p_before)
+                - sqrt((p_after - wilson_lower(after))^2 + (wilson_upper(before) - p_before)^2)
 
-    None when nothing ran after the landing, for the reason `rarity_for_counts` returns None there:
-    a rate over zero runs is not thin evidence, it is no evidence. This ranks escapes against each
-    other; it does not decide STRONG or RARE above, which stays the raw rate against
-    `ESCAPE_FAILURE_PCT`.
+    A lower bound and not the difference itself, which is the whole point: a difference says how much
+    the rates differ on the runs that happened, and the bound says how much of that difference the
+    number of runs will support. So a test that went from 0 of 4 to 4 of 4 does not outrank one that
+    went from 0 of 94 to 56 of 127, and the share of failing runs after the landing — which is what
+    this replaced — ranked it above.
+
+    None when either side has no runs. Nothing ran after the landing is no change to measure, and
+    nothing ran before it is no baseline to measure against: in both cases the answer is absent rather
+    than zero, and a 0 here would read as a landing shown to have changed nothing.
+
+    Negative is kept signed rather than clamped, because below zero is the ordinary case — most rows
+    in the merged bucket are there on a baseline that was already failing — and it is what
+    `significance_for_counts` reads.
     """
-    if not runs_after:
+    if not runs_after or not runs_before:
         return None
-    n = float(runs_after)
-    p = failed_after / n
-    denominator = 1 + WILSON_Z * WILSON_Z / n
-    centre = p + WILSON_Z * WILSON_Z / (2 * n)
-    margin = WILSON_Z * math.sqrt(p * (1 - p) / n + WILSON_Z * WILSON_Z / (4 * n * n))
-    return max(0.0, (centre - margin) / denominator)
+    before = failed_before / runs_before
+    after = failed_after / runs_after
+    lower_after, _ = _wilson_interval(runs_after, failed_after)
+    _, upper_before = _wilson_interval(runs_before, failed_before)
+    return (after - before) - math.sqrt((after - lower_after) ** 2
+                                        + (upper_before - before) ** 2)
+
+
+def significance_for_counts(runs_before: int, failed_before: int, runs_after: int,
+                            failed_after: int) -> Optional[str]:
+    """Whether the landing measurably worsened the test: the bound above zero, or not.
+
+    None exactly where the bound is None, so a row this cannot answer for is counted in no half of the
+    split rather than in the safe-looking one. No row in the merged bucket reaches that:
+    `verdict_for_counts` sends a conviction with no run after the landing to NO_RUNS and one with no
+    run before it to NO_BASELINE, so both halves together are the whole of the bucket.
+    """
+    increase = rate_increase_for_counts(runs_before, failed_before, runs_after, failed_after)
+    if increase is None:
+        return None
+    return SIGNIFICANT if increase > 0 else NOT_SIGNIFICANT
 
 
 def currency_for_counts(recent_runs: Optional[int], recent_failed: Optional[int],
@@ -250,14 +291,14 @@ def damage_for_counts(recent_runs: Optional[int], recent_failed: Optional[int]) 
 
 # The two derived figures, as sqlite functions, so a column can be ordered and narrowed by exactly
 # the number the page prints. `db.connect` registers these; nothing re-implements either formula in
-# SQL, which is the whole point — a stored or re-spelled strength is a second definition that can
+# SQL, which is the whole point — a stored or re-spelled rate increase is a second definition that can
 # disagree with the counts shown beside it.
 #
 # Both return None where their inputs carry no evidence, which arrives in SQL as NULL, so every
 # column built on them orders with `nulls_last` set: a row that answers nothing must not outrank one
 # that does, in either direction.
 SQL_FUNCTIONS = (
-    (config.ESCAPE_STRENGTH_FUNCTION, 2, strength_for_counts),
+    (config.ESCAPE_INCREASE_FUNCTION, 4, rate_increase_for_counts),
     (config.ESCAPE_DAMAGE_FUNCTION, 2, damage_for_counts),
 )
 
@@ -315,16 +356,24 @@ class Conviction:
     recent_checked_at: Optional[int] = None
 
     @property
-    def rarity(self) -> Optional[str]:
-        return rarity_for_counts(self.runs_after, self.failed_after)
+    def significance(self) -> Optional[str]:
+        return significance_for_counts(self.runs_before, self.failed_before, self.runs_after,
+                                       self.failed_after)
+
+    @property
+    def significant(self) -> bool:
+        """Whether the landing measurably worsened the test. False where the question cannot be
+        answered at all, since a row with no bound has not been shown to have worsened anything."""
+        return self.significance == SIGNIFICANT
 
     @property
     def currency(self) -> str:
         return currency_for_counts(self.recent_runs, self.recent_failed, self.recent_checked_at)
 
     @property
-    def strength(self) -> Optional[float]:
-        return strength_for_counts(self.runs_after, self.failed_after)
+    def rate_increase(self) -> Optional[float]:
+        return rate_increase_for_counts(self.runs_before, self.failed_before, self.runs_after,
+                                        self.failed_after)
 
     @property
     def damage(self) -> Optional[float]:
@@ -335,38 +384,53 @@ class Conviction:
 class Subcategories:
     """How a window's escapes split, three times over, and how many tests they name.
 
-    Three partitions of the one number, not eight buckets: what main is doing with the test now, how
-    hard it failed after the landing, and what main had done with it before. Counted here rather than
-    in a template so every total is the escape count and a page cannot print a split that does not
-    add up.
+    Three partitions of the one number, not eight buckets: what main is doing with the test now,
+    whether the landing measurably worsened it, and what main had done with it before. Counted here
+    rather than in a template so every total is the escape count and a page cannot print a split that
+    does not add up.
 
     `distinct_tests` is not a partition and is not comparable to the others: it is how many test names
     the same convictions name. One landed regression makes a fresh conviction on every later pull
     request whose build trips the same test, so the conviction count runs well ahead of the number of
     underlying regressions and a page that prints only the former invites reading it as the latter.
+    `significant_tests` is the same count over the significant half alone, which the headline needs:
+    the figure it leads with is a count of blame events, and the number of tests behind them is the
+    thing a reader would otherwise infer wrongly from it.
     """
 
     still_failing: int = 0
     recovered: int = 0
     not_run_lately: int = 0
     unchecked: int = 0
-    strong: int = 0
-    rare: int = 0
+    significant: int = 0
+    not_significant: int = 0
     baseline_clean: int = 0
     baseline_failing: int = 0
     distinct_tests: int = 0
+    significant_tests: int = 0
 
     @property
     def total(self) -> int:
         return self.still_failing + self.recovered + self.not_run_lately + self.unchecked
 
     @property
-    def rate_total(self) -> int:
-        return self.strong + self.rare
+    def significance_total(self) -> int:
+        return self.significant + self.not_significant
 
     @property
     def baseline_total(self) -> int:
         return self.baseline_clean + self.baseline_failing
+
+    def significant_rate_pct(self, decided: int) -> Optional[float]:
+        """The significant half as a share of every conviction main answered, which is the headline.
+
+        Taken over `decided` rather than over this split's own total, because the question the page
+        leads with is what share of the answers were a landing making a test worse — not what share of
+        the escapes were. None over an empty denominator rather than 0%, which would claim an answer.
+        """
+        if not decided:
+            return None
+        return round(100.0 * self.significant / decided, 1)
 
 
 @dataclass(frozen=True)
@@ -516,8 +580,9 @@ def verdict_for_counts(runs_before: int, failed_before: int, runs_after: int,
 
     The baseline decides whose failure it is and nothing else does: a test main was already failing,
     at any rate at all, is main's, and a test main had never failed before the landing escaped
-    whether it then failed most of the runs or one of them. How hard it failed is `rarity_for_counts`,
-    read off these same counts wherever an escape is shown rather than stored as a verdict of its own.
+    whether it then failed most of the runs or one of them. Whether the landing measurably worsened
+    the test is `significance_for_counts`, read off these same counts wherever an escape is shown
+    rather than stored as a verdict of its own.
     """
     if not runs_after:
         return NO_RUNS
@@ -782,8 +847,8 @@ def _verdict_scope(verdicts: object) -> tuple:
 def escape_subcategories(connection: sqlite3.Connection, since: int, until: int,
                          suite: Optional[str] = None,
                          builders: tuple = ()) -> Subcategories:
-    """How the window's escapes split by what main did before, how hard they failed, and what main is
-    doing now — and how many distinct tests they name.
+    """How the window's escapes split by what main did before, whether the landing measurably worsened
+    the test, and what main is doing now — and how many distinct tests they name.
 
     Over the whole merged bucket, both stored verdicts, because a split counted over less than the
     category it sits under would print three partitions of a number that is not the one above them.
@@ -798,9 +863,11 @@ def escape_subcategories(connection: sqlite3.Connection, since: int, until: int,
     parameters.update(bound)
     parameters.update({'since': since, 'until': until})
     counted: Counter = Counter()
-    tests = set()
+    tests: set = set()
+    significant_tests: set = set()
     for row in connection.execute(
-            f'''SELECT outcome.test_name, outcome.verdict, outcome.runs_after,
+            f'''SELECT outcome.test_name, outcome.verdict, outcome.runs_before,
+                       outcome.failed_before, outcome.runs_after,
                        outcome.failed_after, outcome.recent_runs, outcome.recent_failed,
                        outcome.recent_checked_at
                 FROM escape_verdicts AS outcome
@@ -812,15 +879,18 @@ def escape_subcategories(connection: sqlite3.Connection, since: int, until: int,
         counted[currency_for_counts(row['recent_runs'], row['recent_failed'],
                                     row['recent_checked_at'])] += 1
         counted[BASELINE_FAILING if row['verdict'] == FAILS_ON_MAIN else BASELINE_CLEAN] += 1
-        rarity = rarity_for_counts(row['runs_after'], row['failed_after'])
-        if rarity is not None:
-            counted[rarity] += 1
+        significance = significance_for_counts(row['runs_before'], row['failed_before'],
+                                               row['runs_after'], row['failed_after'])
+        if significance is not None:
+            counted[significance] += 1
+        if significance == SIGNIFICANT:
+            significant_tests.add(row['test_name'])
     return Subcategories(still_failing=counted[STILL_FAILING], recovered=counted[RECOVERED],
                          not_run_lately=counted[NOT_RUN_LATELY], unchecked=counted[UNCHECKED],
-                         strong=counted[STRONG], rare=counted[RARE],
+                         significant=counted[SIGNIFICANT], not_significant=counted[NOT_SIGNIFICANT],
                          baseline_clean=counted[BASELINE_CLEAN],
                          baseline_failing=counted[BASELINE_FAILING],
-                         distinct_tests=len(tests))
+                         distinct_tests=len(tests), significant_tests=len(significant_tests))
 
 
 @dataclass(frozen=True)
@@ -905,7 +975,7 @@ def convictions(connection: sqlite3.Connection, since: int, until: int, verdicts
 
     `conditions` and `sort_keys` come from `filters`, which owns every column name, operator and
     expression a request can reach: nothing a reader typed is spelled into this SQL, only bound to it.
-    The strength and damage columns are ordered and narrowed through the sqlite functions
+    The rate-increase and damage columns are ordered and narrowed through the sqlite functions
     `db.connect` registers from `SQL_FUNCTIONS`, so the figure a page sorts by is the one it prints.
 
     `page` is a number rather than an offset so the arithmetic lives here, where `limit` is known: a
@@ -1046,31 +1116,43 @@ def _currency_clause(conviction: Conviction) -> 'tuple[Part, ...]':
     return ()
 
 
+def _significance_clause(conviction: Conviction) -> Part:
+    """Whether the landing measurably worsened the test, which is the split this bucket is read by.
+
+    One clause for both halves of the merged bucket, because it is the same question of both and the
+    counts either side are what answers it. A row the bound cannot be taken on says the question is
+    unanswerable rather than saying no: no row in this bucket reaches that, and silence there would
+    read as a landing shown to have changed nothing.
+    """
+    significance = conviction.significance
+    if significance == SIGNIFICANT:
+        return Part(' The landing measurably worsened it.')
+    if significance == NOT_SIGNIFICANT:
+        return Part(' The landing did not measurably worsen it.')
+    return Part(' Whether the landing worsened it cannot be measured from these runs.')
+
+
 def _escaped_sentence(conviction: Conviction) -> 'tuple[Part, ...]':
-    """The counts behind the escape, how hard it failed, and what main is doing with it now."""
-    if conviction.rarity == RARE:
-        rate = Part(f', below the {config.ESCAPE_FAILURE_PCT}% a strong escape needs, so the '
-                    'escape rests on few failures,')
-    else:
-        rate = Part(f', at or above the {config.ESCAPE_FAILURE_PCT}% a strong escape needs,')
+    """The counts behind the escape, whether the landing worsened the test, and what main is doing with
+    it now."""
     return (
         Part('Main failed it '),
         _emphasised(f'{conviction.failed_after} of {conviction.runs_after}'),
-        Part(' runs after the landing'),
-        rate,
-        Part(' having never failed it in the '),
+        Part(' runs after the landing, having never failed it in the '),
         _emphasised(str(conviction.runs_before)),
         Part(' runs before.'),
+        _significance_clause(conviction),
     ) + _currency_clause(conviction)
 
 
 def sentence(conviction: Conviction) -> 'tuple[Part, ...]':
     """Why this conviction reached the verdict it did, in the counts main was asked for."""
     if conviction.verdict == FAILS_ON_MAIN:
-        # The counts on both sides and no conclusion drawn from them. This row sits in the same
-        # bucket as an ESCAPED one now, and the old tail ("main's failure, not this change's") was
-        # the knife-edge reading the fold exists to stop making: one failure in a long clean baseline
-        # is not grounds for telling a reader whose failure it is.
+        # The counts on both sides, and the one conclusion the counts do support. This row sits in the
+        # same bucket as an ESCAPED one now, and the old tail ("main's failure, not this change's")
+        # was the knife-edge reading the fold exists to stop making: one failure in a long clean
+        # baseline is not grounds for telling a reader whose failure it is. What the two count pairs
+        # do answer is whether the landing made the test measurably worse, so that is what is said.
         return (
             Part('Main failed it '),
             _emphasised(f'{conviction.failed_after} of {conviction.runs_after}'),
@@ -1079,7 +1161,8 @@ def sentence(conviction: Conviction) -> 'tuple[Part, ...]':
             Part(' the landing, and '),
             _emphasised(f'{conviction.failed_before} of {conviction.runs_before}'),
             Part(' before it.'),
-        )
+            _significance_clause(conviction),
+        ) + _currency_clause(conviction)
     if conviction.verdict == CONTAINED:
         return (
             Part('Main ran it '),

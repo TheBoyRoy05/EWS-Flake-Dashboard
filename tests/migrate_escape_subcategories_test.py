@@ -91,8 +91,10 @@ class TestMigrate(fixtures.DatabaseTest):
             (152, 0, 96, 1),
         )
         self.assertEqual((row['window_ends_at'], row['decided_at']), (WINDOW_ENDS_AT, LANDED_AT))
-        self.assertEqual(escapes.rarity_for_counts(row['runs_after'], row['failed_after']),
-                         escapes.RARE)
+        self.assertEqual(
+            escapes.significance_for_counts(row['runs_before'], row['failed_before'],
+                                            row['runs_after'], row['failed_after']),
+            escapes.NOT_SIGNIFICANT)
 
     def test_every_other_row_survives_untouched(self) -> None:
         self._store_verdict(1, RETIRED)

@@ -1,5 +1,5 @@
 {% extends 'base.html' %}
-{% from 'parts.html' import window_chooser, suite_chooser, queue_dropdown, staleness, rate %}
+{% from 'parts.html' import window_chooser, suite_chooser, queue_dropdown, staleness %}
 
 {% block title %}EWS flake detection — escapes{% endblock %}
 
@@ -72,8 +72,9 @@
 
 <div class="row metrics">
   <div class="col-4 metric">
-    <div class="text tiny label">Convictions main failed the test after</div>
-    {{ rate(tally.escape_rate_pct, tally.escaped, tally.decided, 'convictions main answered') }}
+    <div class="text tiny label">Strong escapes</div>
+    <span class="value">{{ subcategories.significant_rate_pct(tally.decided) | percent }}</span>
+    <span class="text tiny denominator">{{ subcategories.significant | count }} of {{ tally.decided | count }} convictions main answered, on {{ subcategories.significant_tests | count }} distinct tests</span>
   </div>
   <div class="col-4 metric">
     <div class="text tiny label">Convictions main answered nothing about</div>
@@ -113,9 +114,13 @@
         <span class="line text tiny"><span class="label">has stopped failing it</span><span class="tally">{{ subcategories.recovered | count }}</span></span>
         <span class="line text tiny" title="Main ran the test no times in the last {{ currency_days }} days, so it has demonstrated neither the failure nor a recovery."><span class="label">has not run it lately</span><span class="tally">{{ subcategories.not_run_lately | count }}</span></span>
         <span class="line text tiny" title="Nothing has asked main about these since the verdict was reached, so they are neither still failing nor recovered."><span class="label">not checked yet</span><span class="tally">{{ subcategories.unchecked | count }}</span></span>
-        <span class="split text tiny">and after the landing failed</span>
-        <span class="line text tiny"><span class="label">{{ failure_pct }}% of the runs or more</span><span class="tally">{{ subcategories.strong | count }}</span></span>
-        <span class="line text tiny"><span class="label">fewer than that</span><span class="tally">{{ subcategories.rare | count }}</span></span>
+        {# The one number this pane exists to surface, so it carries the same red `state` pill the
+           ESCAPED bucket above it does — an existing class reused rather than a new one, and the same
+           colour for the same claim. The other lines stay plain, which is what makes this one read as
+           the answer and them as the detail behind it. #}
+        <span class="split text tiny">and the rate increase is</span>
+        <span class="line text tiny" title="The rise after the landing is larger than the evidence could explain by chance, at alpha {{ '%.2f' | format(significance_alpha) }}. Strong no longer means a share of the runs after the landing failing."><span class="label"><span class="state {{ escaped_verdict | state_class }}">strongly escaped</span></span><span class="tally">{{ subcategories.significant | count }}</span></span>
+        <span class="line text tiny" title="The rise is not distinguishable from chance. Not the same as no failures: main did fail the test after the landing, and nobody has shown the landing raised the rate."><span class="label">unproven</span><span class="tally">{{ subcategories.not_significant | count }}</span></span>
       </div>
       {% endif %}
       {% endfor %}
@@ -230,11 +235,11 @@
          page: the sorted column carries an arrow, and the sort control in the header above shows the
          column and direction it holds — including for the two after-the-landing counts, which have no
          column of their own. A paragraph restating that was furniture, and on a category that prints
-         no strength figure it was worse than furniture: it announced an order over a column of em
+         no rate increase it was worse than furniture: it announced an order over a column of em
          dashes, which is a defect to fix rather than to narrate. Those categories now read by landing
-         time and do not offer a strength sort at all. #}
+         time and do not offer a rate-increase sort at all. #}
       <table class="table full-width convictions">
-        <thead><tr>{{ sort_header('test', 'Test') }}<th>Rule</th><th>Queue</th><th>Why</th>{{ sort_header('landed', 'Landed', 'when') }}<th>Links</th>{% if shows_strength %}{{ sort_header('strength', 'Escape strength', 'numeric') }}{% else %}<th class="numeric">Escape strength</th>{% endif %}{{ sort_header('damage', 'Current damage', 'numeric') }}</tr></thead>
+        <thead><tr>{{ sort_header('test', 'Test') }}<th>Rule</th><th>Queue</th><th>Why</th>{{ sort_header('landed', 'Landed', 'when') }}<th>Links</th>{% if shows_increase %}{{ sort_header('increase', 'Rate increase', 'numeric') }}{% else %}<th class="numeric">Rate increase</th>{% endif %}{{ sort_header('damage', 'Current damage', 'numeric') }}</tr></thead>
         <tbody>
           {% for conviction in listed.convictions %}
           <tr>
@@ -248,7 +253,7 @@
               {% if conviction.pr_id %}<a href="{{ links.pull_request(conviction.pr_id) }}" target="_blank" rel="noopener">PR</a>{% endif %}
               <a href="{{ links.test_investigation(conviction.configuration, conviction.test_name) }}" target="_blank" rel="noopener">History</a>
             </td>
-            <td class="numeric text tiny">{% if conviction.verdict not in escape_verdicts or conviction.strength is none %}—{% else %}{{ (conviction.strength * 100) | round(1) | percent }}<span class="evidence">{{ conviction.failed_after }}/{{ conviction.runs_after }}</span>{% endif %}</td>
+            <td class="numeric text tiny">{% if conviction.verdict not in escape_verdicts or conviction.rate_increase is none %}—{% else %}{{ (conviction.rate_increase * 100) | round(1) | percent }}<span class="evidence">{{ conviction.failed_after }}/{{ conviction.runs_after }}</span>{% endif %}</td>
             <td class="numeric text tiny">{% if conviction.verdict not in escape_verdicts or conviction.damage is none %}—{% else %}{{ (conviction.damage * 100) | round(1) | percent }}<span class="evidence">{{ conviction.recent_failed }}/{{ conviction.recent_runs }}</span>{% endif %}</td>
           </tr>
           {% endfor %}
@@ -274,29 +279,39 @@
     <details class="caveats-disclosure">
       <summary>How an escape is decided, and what this page cannot see</summary>
       <div class="caveats text tiny">
-        <p>An escape is a test main failed after the landing, whether or not main had failed it before. What the baseline said is the split under the bucket — was not failing it, or was already failing it — and no longer two separate buckets: one failure in a long clean baseline was all that separated them, and that is not a difference a reader is looking for. The rate says how sure — {{ failure_pct }}% or more of the runs after is strong, less than that rests on few failures. The distinct-test count is beside the conviction count because one landed regression makes a fresh conviction on every later pull request whose build trips the same test. Whether main is still failing the test is asked separately, over the last {{ currency_days }} days, and answers four ways: still failing, stopped failing, not run in that window at all, or not yet asked about. The last two measure nothing, so neither is counted as a recovery, and today only the clean-baseline half has ever been asked.</p>
-        <p>A floor, like every number here: only landings pinned from a PR title, only tests a bot runs on main in the same configuration, only the {{ window_days }} days either side. Undecided convictions are counted above, not dropped.</p>
+        <ul>
+          <li>An escape is a test main failed after the landing.</li>
+          <li>A conviction count is not a regression count: one landed regression convicts again on every later pull request tripping the same test.</li>
+          <li>A floor: only landings pinned from a pull request title, only tests a bot runs on main in the same configuration, only the {{ window_days }} days either side.</li>
+          <li>Undecided convictions are counted above, not dropped.</li>
+        </ul>
       </div>
     </details>
   </div>
 </div>
 
-<details class="section legend-pane" open>
+{# Collapsed, like the caveats disclosure above it. It is reference material — what a figure means and
+   what it does not — rather than something to read on every visit, and 280 words held open at the foot
+   of the page were read as furniture instead of as the disclosures they are. #}
+<details class="section legend-pane">
   <summary class="header"><span class="title">Legend</span></summary>
   <div class="content">
     <div class="legend-group">
-      <div class="legend-group-title text tiny">Escape strength — a lower bound on the failure share after the landing</div>
-      <p class="text tiny">The inputs are failed_after of runs_after, the pair shown beneath the figure, counted in the {{ window_days }} days after the landing.</p>
-      <p class="text tiny">The figure is the lower end of the 90% <a href="https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval#Wilson_score_interval" target="_blank" rel="noopener">Wilson score interval</a> on that ratio, not the ratio itself.</p>
-      <p class="text tiny">Why a bound and not the rate: the bound sinks thin evidence. 1 failure in 8 runs is 12.5% raw but 2.8% bounded, while 7 in 98 is 7.1% raw and 3.9% bounded, so the bound puts the two escapes in the right order and the raw rate does not.</p>
-      <p class="text tiny">It ranks escapes against each other; it is not a confidence claim. Runs are not independent trials — they cluster by machine, by neighbouring test and by load, and retries inside a step are correlated by construction.</p>
-      <p class="text tiny">It does not decide the strong-or-rare split shown above, which stays the raw rate against {{ failure_pct }}%, so this page never carries two definitions of strong.</p>
+      <div class="legend-group-title text tiny">Rate increase — how much worse the landing made the test</div>
+      <ul class="text tiny">
+        <li>Inputs: the count pairs either side of the landing.</li>
+        <li>Newcombe square-and-add lower bound on two <a href="https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval#Wilson_score_interval" target="_blank" rel="noopener">Wilson intervals</a>, alpha {{ '%.2f' | format(significance_alpha) }} — not the rate.</li>
+        <li>Strong: bound above zero — a rise beyond chance, not the old 50% run share.</li>
+        <li>Unproven: bound zero or below — no rise shown, not no failures.</li>
+      </ul>
     </div>
     <div class="legend-group">
-      <div class="legend-group-title text tiny">Current damage — what main is doing with the test right now, as a rate</div>
-      <p class="text tiny">The inputs are recent_failed of recent_runs from the last currency check, over the {{ currency_days }} days ending when that check ran.</p>
-      <p class="text tiny">Blank means no answer, not zero: either nobody has asked yet, or main ran the test not at all in that window.</p>
-      <p class="text tiny">Two known limits, disclosed rather than hidden: the currency window is not clamped to the landing, so it can reach back to runs from before the change landed; and recent_runs is a floor rather than a total, because the runs query's limit of 100 applies per response group, so the oldest runs in a wide window can be dropped silently.</p>
+      <div class="legend-group-title text tiny">Current damage — how often main fails it now</div>
+      <ul class="text tiny">
+        <li>Inputs: recent_failed of recent_runs, last {{ currency_days }} days.</li>
+        <li>Blank is no answer, not zero: nobody asked, or main ran it no times.</li>
+        <li>recent_runs is a floor (limit is per response group); the window is not clamped to the landing.</li>
+      </ul>
     </div>
   </div>
 </details>

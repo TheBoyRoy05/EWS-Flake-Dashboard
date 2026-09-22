@@ -27,10 +27,16 @@ PRE_EXISTING_THRESHOLD_PCT = 80
 # test convicted for flaking over three days is checked over the same span.
 ESCAPE_WINDOW_DAYS = 3
 
-# What share of a test's post-landing runs on main must fail unexpectedly for an escape to count as a
-# strong one. Whether anything escaped is decided by the baseline instead — main never failed the
-# test before the landing — and below this share the escape stands on fewer failures.
-ESCAPE_FAILURE_PCT = 50
+# How much of a rate increase the page insists on being sure of before it says a landing worsened a
+# test: the one-sided significance level of the bound `escapes.rate_increase_for_counts` computes, so
+# an increase whose lower bound clears zero at this level is what the page calls measurable. A share
+# of the post-landing runs used to decide this instead, at 50%, which ignored both the sample size and
+# the baseline — a test main had never failed in 94 runs and then failed 56 of 127 after the landing
+# was dismissed for falling under the share, on more evidence than most rows above it had.
+#
+# The z this implies is derived from it rather than written down beside it, so there is one number to
+# change and no second one to forget.
+ESCAPE_SIGNIFICANCE_ALPHA = 0.10
 
 # How far back from the moment of the check main is asked whether it is still failing an escaped
 # test. A fresh window ending now, not the window either side of the landing: whether the regression
@@ -57,12 +63,12 @@ TREE_DIVERGED = 'TREE_DIVERGED'
 
 ESCAPE_VERDICTS = (ESCAPED, FAILS_ON_MAIN, CONTAINED, NO_RUNS, NO_BASELINE, TREE_DIVERGED)
 
-# What `escapes.strength_for_counts` and `escapes.damage_for_counts` are registered under on a
+# What `escapes.rate_increase_for_counts` and `escapes.damage_for_counts` are registered under on a
 # connection (`db.connect`), so a column can be ordered and narrowed by a figure the page derives on
 # read rather than by a second copy of the formula written in SQL. Named here for the same reason the
 # verdicts are: `filters` spells them into a column expression and `escapes` registers them, and
 # neither may import the other.
-ESCAPE_STRENGTH_FUNCTION = 'escape_strength'
+ESCAPE_INCREASE_FUNCTION = 'escape_rate_increase'
 ESCAPE_DAMAGE_FUNCTION = 'escape_damage'
 
 # Above this many author-visible failures the build is a crash storm, not a set of test results;
