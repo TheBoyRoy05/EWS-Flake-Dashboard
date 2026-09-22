@@ -100,15 +100,15 @@
         <tbody>
           {% for conviction in convictions %}
           <tr>
-            <td><a href="{{ links.test_history(conviction.configuration, conviction.test_name) }}">{{ conviction.test_name }}</a></td>
+            <td><a href="{{ links.test_history(conviction.configuration, conviction.test_name) }}" target="_blank" rel="noopener">{{ conviction.test_name }}</a></td>
             <td class="text tiny">{{ conviction.rule }}</td>
             <td class="text tiny">{{ conviction.builder }}</td>
             <td class="text tiny">{% for part in sentence(conviction) %}{% if part.emphasis %}<strong>{{ part.text }}</strong>{% else %}{{ part.text }}{% endif %}{% endfor %}</td>
             <td class="when text tiny">{% if conviction.landed_at is none %}Landing time unknown{% else %}{{ conviction.landed_at | moment }}{% endif %}</td>
             <td class="text tiny links">
-              <a href="{{ links.build(conviction.builder_id, conviction.build_number) }}">Build</a>
-              {% if conviction.pr_id %}<a href="{{ links.pull_request(conviction.pr_id) }}">PR {{ conviction.pr_id }}</a>{% endif %}
-              <a href="{{ links.test_investigation(conviction.configuration, conviction.test_name) }}">History</a>
+              <a href="{{ links.build(conviction.builder_id, conviction.build_number) }}" target="_blank" rel="noopener">Build</a>
+              {% if conviction.pr_id %}<a href="{{ links.pull_request(conviction.pr_id) }}" target="_blank" rel="noopener">PR</a>{% endif %}
+              <a href="{{ links.test_investigation(conviction.configuration, conviction.test_name) }}" target="_blank" rel="noopener">History</a>
             </td>
             <td class="numeric text tiny">{% if conviction.verdict != escaped_verdict or conviction.strength is none %}—{% else %}{{ (conviction.strength * 100) | round(1) | percent }}<span class="evidence">{{ conviction.failed_after }}/{{ conviction.runs_after }}</span>{% endif %}</td>
             <td class="numeric text tiny">{% if conviction.verdict != escaped_verdict or conviction.damage is none %}—{% else %}{{ (conviction.damage * 100) | round(1) | percent }}<span class="evidence">{{ conviction.recent_failed }}/{{ conviction.recent_runs }}</span>{% endif %}</td>
@@ -139,7 +139,7 @@
     <div class="legend-group">
       <div class="legend-group-title text tiny">Escape strength — a lower bound on the failure share after the landing</div>
       <p class="text tiny">The inputs are failed_after of runs_after, the pair shown beneath the figure, counted in the {{ window_days }} days after the landing.</p>
-      <p class="text tiny">The figure is the lower end of the 90% <a href="https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval#Wilson_score_interval">Wilson score interval</a> on that ratio, not the ratio itself.</p>
+      <p class="text tiny">The figure is the lower end of the 90% <a href="https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval#Wilson_score_interval" target="_blank" rel="noopener">Wilson score interval</a> on that ratio, not the ratio itself.</p>
       <p class="text tiny">Why a bound and not the rate: the bound sinks thin evidence. 1 failure in 8 runs is 12.5% raw but 2.8% bounded, while 7 in 98 is 7.1% raw and 3.9% bounded, so the bound puts the two escapes in the right order and the raw rate does not.</p>
       <p class="text tiny">It ranks escapes against each other; it is not a confidence claim. Runs are not independent trials — they cluster by machine, by neighbouring test and by load, and retries inside a step are correlated by construction.</p>
       <p class="text tiny">It does not decide the strong-or-rare split shown above, which stays the raw rate against {{ failure_pct }}%, so this page never carries two definitions of strong.</p>
