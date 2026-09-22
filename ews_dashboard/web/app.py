@@ -47,6 +47,13 @@ DEFAULT_SORT = 'convictions'
 # order and the printed figure are one definition.
 ESCAPES_DEFAULT_SORT = 'strength'
 
+# What those pages read in instead on a category that prints no strength figure. Strength is printed
+# only for the verdicts in the merged ESCAPED bucket: a CONTAINED row has no failures after the
+# landing so every bound is 0, and a NO_RUNS or TREE_DIVERGED row has no runs to take a bound from at
+# all. Ordering those by strength put an arrow on a column of em dashes and sorted the rows by a
+# figure the reader could not see, so they read by landing time, which they do print.
+ESCAPES_WITHOUT_STRENGTH_SORT = 'landed'
+
 # Which page of the escapes listing to show. Named `page` rather than an offset because it is a URL a
 # reader can read, and the offset is derived from it against the page size the query actually used.
 PAGE_ARGUMENT = 'page'
@@ -695,12 +702,14 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
     scope = _scope(open_connection, window)
     verdict_shown = escapes.category_of(_chosen('verdict', escapes.VERDICTS, escapes.ESCAPED))
     asked = filters.requested(_canonical_filter_arguments(filters.ESCAPES), filters.ESCAPES)
-    primary = _primary_sort(filters.ESCAPES, asked.sort_keys, ESCAPES_DEFAULT_SORT)
+    shows_strength = verdict_shown == escapes.ESCAPED
+    primary = _primary_sort(filters.ESCAPES, asked.sort_keys,
+                            ESCAPES_DEFAULT_SORT if shows_strength else ESCAPES_WITHOUT_STRENGTH_SORT)
     listed = escapes.convictions(open_connection, window.since, window.until,
                                  escapes.category_verdicts(verdict_shown),
                                  suite=scope.suite, builders=scope.builders,
                                  page=_page_asked_for(), conditions=asked.conditions,
-                                 sort_keys=_escape_order(asked.sort_keys))
+                                 sort_keys=_escape_order(asked.sort_keys, shows_strength))
     counted = escapes.tally(open_connection, window.since, window.until,
                             suite=scope.suite, builders=scope.builders)
     return dict(
@@ -726,6 +735,7 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
         failure_pct=config.ESCAPE_FAILURE_PCT,
         currency_days=config.CURRENCY_DAYS,
         sort=primary.column.name,
+        shows_strength=shows_strength,
         descending=primary.descending,
         descending_first=filters.ESCAPES.descending_first,
         sort_label=primary.column.label,
@@ -754,6 +764,10 @@ FALLBACK_SORT = ((DEFAULT_SORT, True), ('last_seen', True))
 # request already ordered on, so asking for `strength:asc` does not get strength twice.
 ESCAPES_FALLBACK_SORT = ((ESCAPES_DEFAULT_SORT, True), ('landed', True))
 
+# The same, for a category that prints no strength figure: landing time alone, since a strength key
+# there would order the rows by a column of em dashes.
+ESCAPES_FALLBACK_SORT_WITHOUT_STRENGTH = ((ESCAPES_WITHOUT_STRENGTH_SORT, True),)
+
 
 def _primary_sort(table: filters.Table, keys: tuple, default: str) -> filters.SortKey:
     """The key a column heading marks as the one the table is ordered by, which is the first key a
@@ -774,15 +788,19 @@ def _test_order(keys: tuple) -> tuple:
     return tuple(keys) + filters.sort_keys(filters.TESTS, FALLBACK_SORT)
 
 
-def _escape_order(keys: tuple) -> tuple:
+def _escape_order(keys: tuple, shows_strength: bool = True) -> tuple:
     """The sort keys behind a page of escape convictions: what the request asked for, then strength
     and landing time, then the tiebreak `filters` adds.
+
+    A category that prints no strength figure falls back on landing time alone, so its rows are never
+    ordered by a bound the table renders as an em dash.
 
     The tiebreak is not decoration here the way it can look on an uncapped table: this listing pages
     with LIMIT/OFFSET, and two queries that break a tie differently would drop a row from one page and
     repeat it on the next.
     """
-    return tuple(keys) + filters.sort_keys(filters.ESCAPES, ESCAPES_FALLBACK_SORT)
+    fallback = ESCAPES_FALLBACK_SORT if shows_strength else ESCAPES_FALLBACK_SORT_WITHOUT_STRENGTH
+    return tuple(keys) + filters.sort_keys(filters.ESCAPES, fallback)
 
 
 def _build_detail(

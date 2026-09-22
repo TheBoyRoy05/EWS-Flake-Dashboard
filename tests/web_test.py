@@ -1863,17 +1863,21 @@ class TestEscapesOrder(EscapeRows):
         self.assertEqual(set(self.SORTED_HEADER.findall(self.page('/escapes'))),
                          {'Escape strength'})
 
-    def test_the_order_is_named_in_words_only_where_the_arrow_cannot_say_it(self) -> None:
-        """Beside a sorted column that prints its own arrow the sentence repeats what is already a
-        line below it. It is kept for the orders an arrow cannot show: a column this table does not
-        print, strength on a category that renders it as a dash, and a narrowed table."""
+    def test_no_sentence_names_the_order_because_the_page_already_shows_it(self) -> None:
+        """The order is on the page twice without a paragraph: the sorted column carries an arrow, and
+        the sort control holds the column and direction it was set to — including for the two
+        after-the-landing counts, which have no column of their own to mark."""
         self._three_escapes()
-        self.assertNotIn('Ordered by', self.page('/escapes'))
-        self.assertNotIn('Ordered by', self.page(f'/escapes?{ESCAPE_SORT}=test:asc'))
-        self.assertIn('Ordered by Runs after landing, highest first.',
-                      self.page(f'/escapes?{ESCAPE_SORT}=runs_after:desc'))
-        self.assertIn('Ordered by Escape strength (%), highest first, filtered by',
-                      self.page(f'/escapes?{ESCAPE_FILTER}=test:has:fast'))
+        for url in ('/escapes', f'/escapes?{ESCAPE_SORT}=test:asc',
+                    f'/escapes?{ESCAPE_SORT}=runs_after:desc',
+                    f'/escapes?{ESCAPE_FILTER}=test:has:fast'):
+            self.assertNotIn('Ordered by', self.page(url), f'{url} still names its order in prose')
+        self.assertRegex(self.page('/escapes'),
+                         r'<th class="sortable numeric sorted">.*?Escape strength'
+                         r'<span class="arrow">▾</span>')
+        counted = self.page(f'/escapes?{ESCAPE_SORT}=runs_after:desc')
+        self.assertIn('<option value="runs_after" selected>Runs after landing</option>', counted)
+        self.assertIn('<option value="desc" selected>Descending</option>', counted)
 
     def test_a_sort_argument_reorders_the_listed_convictions(self) -> None:
         self._three_escapes()
@@ -2011,7 +2015,8 @@ class TestEscapesFilters(EscapeRows):
         self.assertIn('fast/webgl/a.html', page)
         self.assertNotIn('fast/forms/b.html', page)
         self.assertIn('all 1 shown', page)
-        self.assertIn('filtered by test:has:webgl', page)
+        self.assertIn('<option value="test" selected>', page)
+        self.assertIn('value="webgl"', page)
 
     def test_a_filter_on_a_derived_column_narrows_by_the_number_in_the_cell(self) -> None:
         """The strength column is the registered sqlite function scaled to a percentage, so `at least
@@ -2445,8 +2450,10 @@ class TestEscapesMergedBucket(EscapeRows):
     def test_a_verdict_filter_is_named_rather_than_refused_and_is_clearable(self) -> None:
         self._both_halves()
         page = self.page(f'/escapes?{ESCAPE_FILTER}=verdict:eq:{escapes.FAILS_ON_MAIN}')
-        self.assertIn(f'filtered by verdict:eq:{escapes.FAILS_ON_MAIN}', page)
         self.assertNotIn('Ignored', page)
+        self.assertIn(f'<option value="{escapes.FAILS_ON_MAIN}" selected>', page)
+        self.assertIn('<option value="verdict" selected>', page)
+        self.assertIn('>clear</a>', page)
 
     def test_a_link_naming_the_folded_verdict_opens_the_bucket_that_holds_it(self) -> None:
         """A bookmark from before the fold must not silently land on the default with no sign that
@@ -2466,14 +2473,17 @@ class TestEscapesMergedBucket(EscapeRows):
         page = self.page('/escapes')
         self.assertEqual(len(re.findall(r'>([\d.]+)%<span class="evidence">', page)), 3)
 
-    def test_a_category_outside_the_bucket_still_renders_a_dash_and_names_its_order(self) -> None:
-        """The other half of commit 27a0ceb: where the strength column is dashes the sentence above
-        the table is what says what the arrow is marking."""
+    def test_a_category_outside_the_bucket_prints_no_strength_and_does_not_sort_by_it(self) -> None:
+        """Strength is printed only for the verdicts in the merged bucket, so elsewhere it is neither
+        the order nor a heading a reader can click: an arrow over a column of em dashes sorted the
+        rows by a figure that was not on the page."""
         self._escape(1, 'fast/contained.html', runs_after=100, failed_after=0,
                      verdict=escapes.CONTAINED)
-        page = self.page(f'/escapes?verdict={escapes.CONTAINED}&{ESCAPE_SORT}=strength:desc')
+        page = self.page(f'/escapes?verdict={escapes.CONTAINED}')
         self.assertNotRegex(page, r'>[\d.]+%<span class="evidence">')
-        self.assertIn('Ordered by Escape strength (%), highest first.', page)
+        self.assertIn('<th class="numeric">Escape strength</th>', page)
+        self.assertRegex(page, r'<th class="sortable when sorted">.*?Landed'
+                               r'<span class="arrow">▾</span>')
 
     def test_no_split_is_shown_where_neither_half_reached_anything(self) -> None:
         self._escape(1, 'fast/contained.html', runs_after=100, failed_after=0,

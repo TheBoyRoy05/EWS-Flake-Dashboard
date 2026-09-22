@@ -226,20 +226,15 @@
       <div class="placeholder">No conviction in this window was answered this way. Pick another category to see what main said.</div>
       {% endif %}
       {% else %}
-      {# The order is named in words only where the arrow on the sorted header cannot say it, because
-         beside a sorted column that prints its own arrow the sentence repeats what is already on
-         screen a line below it. Three cases need the words: a sort by a column this table does not
-         print, since the two after-the-landing counts live inside the Why sentence; a sort by Escape
-         strength on a category that renders it as “—”, where the arrow marks a column of dashes; and
-         a narrowed table, whose filter the sentence names. Only beside a table: an empty pane is
-         explained by its placeholder, and a second paragraph there reads as the pane arguing with
-         itself. #}
-      {% set arrowed = ('test', 'landed', 'strength', 'damage') %}
-      {% if asked.narrowing or sort not in arrowed or (sort == 'strength' and verdict_shown != escaped_verdict) %}
-      <p class="order text tiny">Ordered by {{ sort_label }}, {{ 'highest first' if descending else 'lowest first' }}{% if asked.narrowing %}, filtered by {{ asked.filter_clauses | join(' and ') }}{% endif %}.</p>
-      {% endif %}
+      {# No sentence naming the order. Every order a reader can reach is already stated twice on the
+         page: the sorted column carries an arrow, and the sort control in the header above shows the
+         column and direction it holds — including for the two after-the-landing counts, which have no
+         column of their own. A paragraph restating that was furniture, and on a category that prints
+         no strength figure it was worse than furniture: it announced an order over a column of em
+         dashes, which is a defect to fix rather than to narrate. Those categories now read by landing
+         time and do not offer a strength sort at all. #}
       <table class="table full-width convictions">
-        <thead><tr>{{ sort_header('test', 'Test') }}<th>Rule</th><th>Queue</th><th>Why</th>{{ sort_header('landed', 'Landed', 'when') }}<th>Links</th>{{ sort_header('strength', 'Escape strength', 'numeric') }}{{ sort_header('damage', 'Current damage', 'numeric') }}</tr></thead>
+        <thead><tr>{{ sort_header('test', 'Test') }}<th>Rule</th><th>Queue</th><th>Why</th>{{ sort_header('landed', 'Landed', 'when') }}<th>Links</th>{% if shows_strength %}{{ sort_header('strength', 'Escape strength', 'numeric') }}{% else %}<th class="numeric">Escape strength</th>{% endif %}{{ sort_header('damage', 'Current damage', 'numeric') }}</tr></thead>
         <tbody>
           {% for conviction in listed.convictions %}
           <tr>
