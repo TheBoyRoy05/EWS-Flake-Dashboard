@@ -329,6 +329,15 @@ code {
     border-bottom: 1px solid var(--border);
 }
 
+/* A header is a short label, not data: it may wrap between its words but never inside one. Said
+   explicitly rather than left to the default, because `overflow-wrap: anywhere` on a data column used
+   to reach its header too, and a broken word costs twice — `Test` and `Why` rendered as one-letter
+   stacks, and the 1ch min-content that break allows is also what let the table shrink the column to
+   nothing. The columns that do hold unbreakable data scope their own `anywhere` to `td`. */
+.table th {
+    overflow-wrap: normal;
+}
+
 .table td {
     padding: 6px 10px;
     border-bottom: 1px solid var(--border-soft);
@@ -415,11 +424,11 @@ code {
     padding: 6px;
 }
 
-/* The convictions pane's header carries a title, a count and the filter disclosure on one flex line,
-   so the disclosure's width was taken out of the two texts: "Convictions main answered ESCAPED" broke
-   before its verdict badge and "1-200 of 349, 149 more after this page" broke before "more". Neither
-   text gives width now, and the line wraps instead, which is what lets the open disclosure claim the
-   full line its `flex-basis` already asks for. */
+/* The convictions pane's header carries a title, a count and the filter disclosure. The disclosure
+   claims a whole line of its own (dashboard.css:.table-filter), so the two texts only ever share the
+   first line — but they were still breaking inside themselves when that line got short: "Convictions
+   main answered ESCAPED" broke before its verdict badge and "1-200 of 349, 149 more after this page"
+   before "more". Neither text gives width now, and the line wraps between them instead. */
 #convictions > .head {
     flex-wrap: wrap;
 }
@@ -798,17 +807,18 @@ code {
 }
 
 /* The builds pane's filter. It opens into the pane header rather than over the list, because the
-   pane clips its overflow and a positioned dropdown would be cut off at the header's edge. */
+   pane clips its overflow and a positioned dropdown would be cut off at the header's edge. It takes a
+   whole line of that header in both states: the pane is a fixed 300px, so the title, the tally and the
+   pill never fitted on one line anyway and the pill already sat on its own second line closed — saying
+   it unconditionally rather than only under `[open]` is what keeps that true if the pane ever widens,
+   and is what stops this pill jumping the way the tests-table one did. */
 
 .pane.builds > .head { flex-wrap: wrap; }
 .pane.builds > .head .name { margin-right: auto; }
 
 .builds-filter {
-    font-size: var(--tiny);
-}
-
-.builds-filter[open] {
     flex-basis: 100%;
+    font-size: var(--tiny);
 }
 
 .builds-filter > summary {
@@ -894,17 +904,23 @@ code {
 /* A convicted-tests table's own filters, in the section header and collapsed. Not an overlay: the
    panes above clip their overflow, and a :target overlay has no escape key without JavaScript. */
 
+/* The disclosure owns a full line of its header in BOTH states, not only when open. Parking the closed
+   pill at the end of the title line with `margin-left: auto` and then letting `flex-basis: 100%` claim
+   a whole line on open moved the pill down one line AND across to that line's left edge, so the
+   control jumped out from under the pointer that had just clicked it. Owning the line in both states
+   fixes the pill's x and y and leaves opening to grow the form beneath it. */
 .table-filter {
-    margin-left: auto;
+    flex-basis: 100%;
     font-size: var(--tiny);
 }
 
-.table-filter[open] {
-    flex-basis: 100%;
-}
-
+/* Right-aligned by the summary's own auto margin rather than by `text-align` on the disclosure, which
+   the form inside it would otherwise inherit. `fit-content` so the pill is still only as wide as its
+   own label, the way the inline-block it replaces was. */
 .table-filter > summary {
-    display: inline-block;
+    display: block;
+    width: fit-content;
+    margin-left: auto;
     padding: 3px 10px;
     border-radius: 999px;
     border: 1px solid var(--border);
@@ -1109,16 +1125,17 @@ code {
 }
 
 /* An anchored dropdown, not the tests-table filter it borrows its pill chrome from: `.table-filter`'s
-   own `margin-left: auto` and `[open] { flex-basis: 100% }` exist to right-align a filter inside a
-   table header and let its open body claim a full flex line, both wrong for a picker that sits inline
-   among other choosers and must not reflow the row around it. */
+   own `flex-basis: 100%` exists to give a filter a whole line of a table header and right-align its
+   pill on that line, both wrong for a picker that sits inline among other choosers and must not reflow
+   the row around it. So this one takes its width from its own pill and keeps it at the line's start. */
 .queue-tree {
+    flex-basis: auto;
     margin-left: 0;
     position: relative;
 }
 
-.queue-tree[open] {
-    flex-basis: auto;
+.queue-tree > summary {
+    margin-left: 0;
 }
 
 .queue-tree .filter-form {
@@ -1238,12 +1255,81 @@ code {
 
 .table.convictions th:nth-child(1), .table.convictions td:nth-child(1) {
     max-width: 44ch;
-    overflow-wrap: anywhere;
 }
 
 .table.convictions th:nth-child(4), .table.convictions td:nth-child(4) {
     max-width: 60ch;
+}
+
+/* A test path and a whole sentence have no break point the browser would take on its own, so these two
+   are allowed to break inside a word. Cells only: their headers are the single words `Test` and `Why`,
+   which this would stack one letter per line (see `.table th`). */
+.table.convictions td:nth-child(1), .table.convictions td:nth-child(4) {
     overflow-wrap: anywhere;
+}
+
+/* Measured from the width each column needs to stay READABLE, not from the width at which nothing
+   wraps: with eight columns, a test path and a full sentence among them, nothing-wraps is past 200ch
+   and would scroll on every screen there is. Test reads the 76-character path of a typical row in three
+   lines at 26ch; Why reads its longest 242-character sentence in seven at 36ch; Rule is nowrap and
+   `BetweenBuilds` is its longest name at 13 characters; Queue's longest value is a single 46-character
+   hyphenated builder name, which breaks after a hyphen into two lines at 24ch; Landed renders
+   `YYYY-MM-DD` over `HH:MM UTC` at 10; Links stacks `Build`/`PR`/`History`, the longest 7; and the last
+   two headers wrap to `ESCAPE`/`STRENGTH` and `CURRENT`/`DAMAGE`, whose longest words are 8 and 7
+   characters plus a sort arrow — each padded a few ch for the 6px/10px cell padding on both sides, then
+   summed: 26 + 16 + 24 + 36 + 14 + 10 + 13 + 12 = 151, rounded down to 150ch. Below that the pane
+   scrolls rather than shrink the columns further. Without this floor the table fell all the way to its
+   min-content width, which cut `Current damage` off at the pane's right edge and drove rows past twenty
+   lines, one path segment and two words of the sentence at a time. */
+.table.convictions {
+    min-width: 150ch;
+}
+
+/* The pane body is the scroller the table overflows into, which is `.table-scroll`'s job for the
+   convicted-tests table one screen over; this table has no such wrapper and cannot be given one
+   without changing the template, and the body already scrolls its own overflow on the other axis. Said
+   explicitly rather than left to `overflow-y: auto` implying it, because the sticky column below needs
+   a scroll container it can be certain of. */
+#convictions > .body {
+    overflow-x: auto;
+}
+
+/* The test name stays on screen while the rest of its row scrolls underneath — the same
+   `position: sticky` plus opaque `var(--panel)` plus `z-index` treatment `.table-scroll` already gives
+   its header row, turned ninety degrees. The background is what makes it opaque, so the row's own hover
+   colour can no longer reach this cell and is restated for it.
+
+   `left` is negative by exactly the body's own `padding: 6px` (dashboard.css:.pane > .body) rather than
+   0: a sticky cell pins to the scrollport's content edge, so at `left: 0` the six pixels of padding to
+   its left stayed uncovered and the scrolled-under row showed a strip of letters through them. Pinning
+   six pixels further left means the cell's own background spans that gutter, and the column reads flush
+   with the pane's inner edge while scrolled.
+
+   The trailing edge is a pseudo-element, not `border-right` and not `box-shadow`: under
+   `border-collapse: collapse` the table owns a cell's borders and they do not travel with the sticky
+   cell, and a shadow on a collapsed-border cell is not painted at all (verified — a magenta test shadow
+   rendered nothing). The cell is already a positioned box, so the pseudo-element hangs off it directly. */
+#convictions .table.convictions th:nth-child(1),
+#convictions .table.convictions td:nth-child(1) {
+    position: sticky;
+    left: -6px;
+    z-index: 1;
+    background: var(--panel);
+}
+
+#convictions .table.convictions tbody tr:hover > td:nth-child(1) {
+    background: var(--panel-raised);
+}
+
+#convictions .table.convictions th:nth-child(1)::after,
+#convictions .table.convictions td:nth-child(1)::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--border-soft);
 }
 
 /* A rule name is one identifier, so it wraps as a broken word rather than as two: the column is
@@ -1259,6 +1345,11 @@ code {
 
 .table.convicted-tests th:nth-child(1), .table.convicted-tests td:nth-child(1) {
     max-width: 44ch;
+}
+
+/* Cells only, for the same reason the convictions table scopes its own: `Test` is one word and a header
+   that breaks inside it reads as a letter stack (see `.table th`). */
+.table.convicted-tests td:nth-child(1) {
     overflow-wrap: anywhere;
 }
 
