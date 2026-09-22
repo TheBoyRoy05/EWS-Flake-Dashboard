@@ -415,6 +415,20 @@ code {
     padding: 6px;
 }
 
+/* The convictions pane's header carries a title, a count and the filter disclosure on one flex line,
+   so the disclosure's width was taken out of the two texts: "Convictions main answered ESCAPED" broke
+   before its verdict badge and "1-200 of 349, 149 more after this page" broke before "more". Neither
+   text gives width now, and the line wraps instead, which is what lets the open disclosure claim the
+   full line its `flex-basis` already asks for. */
+#convictions > .head {
+    flex-wrap: wrap;
+}
+
+#convictions > .head .name,
+#convictions > .head .tally {
+    flex: 0 0 auto;
+}
+
 /* One row in a pane, drilling one level right */
 
 .entry {
@@ -932,22 +946,55 @@ code {
     border-bottom: none;
 }
 
-.table-filter .chip-group {
-    display: flex;
-    flex: 1 1 22em;
-    flex-wrap: wrap;
+/* The chip form is a grid, not a wrapping flex row, so the block has columns instead of re-staggering
+   every element at every width: the labels share one column and a right edge, the chip rows share the
+   next and a left edge, the add buttons share a third, and the free width is parked in a fourth
+   spacer track so the add buttons sit beside their chips rather than out at the block's right edge.
+   The actions and the vocabulary sentence take the chip column's left edge, which is the one vertical
+   line the reader already follows down the block. The label column is a fixed width rather than
+   `max-content` so the disclosure's own toggle, which sits above the grid and cannot join it (the
+   content of a `details` is laid out inside `::details-content`, so `display: contents` on this form
+   would not reach a grid on the `details`), still falls inside that column. */
+.table-filter .chip-form {
+    --chip-label-column: 3.5rem;
+    display: grid;
+    grid-template-columns: var(--chip-label-column) minmax(0, auto) max-content minmax(0, 1fr);
     align-items: center;
-    gap: 6px;
+    column-gap: 8px;
+    row-gap: 6px;
+}
+
+/* The two groups are wrappers with no box of their own, so they hand their children to the grid
+   above rather than each laying out its own row: that is what puts "Filter" and "Sort" in one
+   column and both "+" buttons in another. */
+.table-filter .chip-group {
+    display: contents;
 }
 
 .table-filter .chip-group-label {
     color: var(--faint);
 }
 
+.table-filter .chip-form .chip-group-label {
+    grid-column: 1;
+    justify-self: end;
+    text-align: right;
+}
+
 .table-filter .chip-row {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
+}
+
+.table-filter .chip-form .chip-row {
+    grid-column: 2;
+    min-width: 0;
+}
+
+.table-filter .chip-form .chip-add {
+    grid-column: 3;
+    justify-self: start;
 }
 
 /* One chip is a column, an operator and a value read as one unit: a shared border rather than three
@@ -1001,6 +1048,13 @@ code {
     gap: 6px;
 }
 
+/* Apply and reset take the chip column rather than the end of the sort row, where they lined up with
+   the sort controls but with nothing above or below them. */
+.table-filter .chip-form .actions {
+    grid-column: 2;
+    justify-self: start;
+}
+
 .table-filter label {
     display: flex;
     align-items: center;
@@ -1048,6 +1102,10 @@ code {
     flex-wrap: wrap;
     gap: 4px 12px;
     color: var(--faint);
+}
+
+.table-filter .chip-form .vocabulary {
+    grid-column: 2 / -1;
 }
 
 /* An anchored dropdown, not the tests-table filter it borrows its pill chrome from: `.table-filter`'s
