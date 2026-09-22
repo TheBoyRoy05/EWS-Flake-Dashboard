@@ -1674,7 +1674,7 @@ class TestEscapes(WebTest):
                             runs_after=96)
         page = self.page('/escapes')
         self.assertNotIn('No conviction in this window escaped:', page)
-        self.assertRegex(page, r'UNPROVEN</span><span class="tally">1</span>')
+        self.assertRegex(page, r'UNPROVEN</span></span><span class="tally">1</span>')
         self.assertRegex(page, r'STRONG</span></span><span class="tally">0</span>')
 
     def test_the_significance_split_under_the_escape_bucket_adds_up_to_it(self) -> None:
@@ -1686,19 +1686,20 @@ class TestEscapes(WebTest):
         self._stored_escape(unproven, 'fast/b.html', escapes.ESCAPED, failed_after=1, runs_after=96)
         page = self.page('/escapes')
         self.assertRegex(page, r'STRONG</span></span><span class="tally">1</span>')
-        self.assertRegex(page, r'UNPROVEN</span><span class="tally">1</span>')
+        self.assertRegex(page, r'UNPROVEN</span></span><span class="tally">1</span>')
 
-    def test_the_strong_line_carries_the_bucket_s_own_state_pill_for_emphasis(self) -> None:
-        """It is the number this page exists to surface, so it is not one more grey row: it reuses the
-        same `state` pill the ESCAPED entry above it wears, and the unproven line stays plain. Both
-        read as the uppercase constants the other pills on this page are, so the split does not look
-        like prose that wandered into a badge."""
+    def test_the_two_split_lines_are_parallel_pills_one_red_one_amber(self) -> None:
+        """Both halves of the split are a state pill, so the pair reads as one question with two
+        answers. STRONG reuses the ESCAPED bucket's own red; UNPROVEN carries `state-UNPROVEN`, which
+        `dashboard.css` folds into the existing amber treatment FAILS_ON_MAIN already uses — nobody has
+        shown it is an escape, which is a warning state and not a clean one."""
         strong = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                   pr_title='One')
         self._stored_escape(strong, 'fast/a.html', escapes.ESCAPED)
         page = self.page('/escapes')
         self.assertIn(f'<span class="state state-{escapes.ESCAPED}">STRONG</span>', page)
-        self.assertIn('<span class="label">UNPROVEN</span>', page)
+        self.assertIn('<span class="state state-UNPROVEN">UNPROVEN</span>', page)
+        self.assertNotIn('<span class="label">UNPROVEN</span>', page)
         self.assertNotIn('strongly escaped', page)
         self.assertNotIn('>unproven<', page)
 
@@ -2490,7 +2491,12 @@ class TestEscapesMergedBucket(EscapeRows):
     reachable on its own.
     """
 
-    CATEGORY_TALLY = re.compile(r'state-(\w+)">\w+</span></span>\s*<span class="tally">(\d+)</span>')
+    # Anchored on the pane entry's own `<span class="line">`, which a split line does not have: a split
+    # line is `class="line text tiny"`. Both now wear a `state` pill, so an unanchored pattern reads
+    # STRONG as the ESCAPED category and UNPROVEN as a category that does not exist.
+    CATEGORY_TALLY = re.compile(r'<span class="line">\s*<span class="label">'
+                                r'<span class="state state-(\w+)">\w+</span></span>\s*'
+                                r'<span class="tally">(\d+)</span>')
     SPLIT_LINE = re.compile(r'<span class="label">([^<]+)</span><span class="tally">(\d+)</span>')
 
     def categories(self, page: str) -> dict:
