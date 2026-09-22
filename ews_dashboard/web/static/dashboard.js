@@ -3,9 +3,10 @@
  *
  * Everything here is optional: the surface is exploded per-chip <select>/<input> controls with
  * ordinary names, so a browser with this file blocked can still add, edit and remove a chip and
- * submit the form. This file only removes the round trip: it swaps a chip's operator and value
- * controls to match a newly chosen column and adds a chip without a request. Editing a chip never
- * submits on its own, since a chip is three controls and the reader is not done after the first.
+ * submit the form. This file only removes round trips: it swaps a chip's operator and value controls
+ * to match a newly chosen column, adds a chip without a request, and applies a chip that has become a
+ * whole clause without the reader reaching for Apply. It never submits a half-built one — see
+ * `chipIsComplete` for what that means and for the two cases it deliberately refuses.
  *
  * The column/operator/vocabulary data comes from the <script type="application/json"> block the
  * template renders from the same `filters` registry the server validates against, so nothing here
@@ -222,10 +223,64 @@ function addChip(row, registry, kind) {
 }
 
 /**
- * Wires one chip form: column changes rebuild that chip's operator/value controls, and the add
- * buttons grow a row client-side instead of round-tripping. A control change deliberately does not
- * submit: a chip is edited across three controls, so submitting on the first of them would reload
- * the page before the reader has said what to compare against.
+ * Whether a chip now holds a clause the server can answer as it stands, which is the only thing
+ * `wireChipForm` submits on.
+ *
+ * A sort clause is complete as soon as it names a column, since its direction control always holds
+ * one of two values. A filter clause needs a column, an operator, and — unless that operator binds no
+ * value at all — a value.
+ *
+ * Two deliberate noes. A column cleared back to "No filter" is not complete: dropping a clause is
+ * what the chip's own delete link is for, and submitting here would reload the page on the way past
+ * that option towards another column. A many-value operator is never complete either: its control is
+ * a multiple select that fires `change` on the first choice, so submitting there would reload the page
+ * between the first element of a list and the second.
+ */
+function chipIsComplete(registry, chip, kind) {
+    var columnSelect = chip.querySelector('.chip-column');
+    if (!columnSelect || !columnSelect.value) {
+        return false;
+    }
+    if (kind !== 'filter') {
+        return true;
+    }
+    var operatorSelect = chip.querySelector('.chip-operator');
+    if (!operatorSelect || !operatorSelect.value) {
+        return false;
+    }
+    var column = registry.columns[columnSelect.value];
+    var arity = operatorArity(column ? column.operators : registry.anyOperators,
+        operatorSelect.value);
+    if (arity === 'many') {
+        return false;
+    }
+    if (arity === 'none') {
+        return true;
+    }
+    var valueControl = chip.querySelector('.chip-value');
+    return !!valueControl && controlValues(valueControl).length > 0;
+}
+
+/**
+ * Applies a finished clause without the reader pressing Apply.
+ *
+ * `form.submit()` rather than `requestSubmit()`: this form's first submit button is "+ filter", and
+ * `requestSubmit()` with no submitter names the default button, so it would send `add_filter=1` and
+ * grow the row instead of applying it. `submit()` sends the fields and no button at all, which is the
+ * request Apply makes.
+ */
+function applyChipForm(form) {
+    form.submit();
+}
+
+/**
+ * Wires one chip form: column changes rebuild that chip's operator/value controls, the add buttons
+ * grow a row client-side instead of round-tripping, and a chip that has become a whole clause applies
+ * itself. Apply stays where it is — with this file blocked it is the only thing that applies a clause,
+ * and every control here is still a plain GET field.
+ *
+ * On `change` only, never `input`: `change` reaches a typed value box when the reader leaves it, so
+ * typing never reloads the page a keystroke at a time.
  */
 function wireChipForm(form) {
     var registry = readRegistry();
@@ -242,6 +297,14 @@ function wireChipForm(form) {
         }
         if (target.classList.contains('chip-operator') && target.closest('[data-chip-kind="filter"]')) {
             onFilterOperatorChanged(registry, target);
+        }
+        var chip = target.closest('.chip');
+        var row = target.closest('[data-chip-kind]');
+        if (!chip || !row) {
+            return;
+        }
+        if (chipIsComplete(registry, chip, row.getAttribute('data-chip-kind'))) {
+            applyChipForm(form);
         }
     });
     form.addEventListener('click', function (event) {

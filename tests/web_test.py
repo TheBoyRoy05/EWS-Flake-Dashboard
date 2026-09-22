@@ -1021,6 +1021,118 @@ class TestTestsTableFilters(WebTest):
         self.assertIn('Showing the first 2 of 5 tests matching test:has:editing.', section)
 
 
+class TestClauseRemoval(WebTest):
+    """Each clause on the filter surface carries its own delete, which is a plain link rather than a
+    scripted button: the whole of it is this request with that one clause left out, so it works with
+    the script blocked exactly as every other control here does.
+
+    Both arguments are repeatable and read in written order, so removing the middle of three has to
+    leave the outer two in the order they were written — a delete that rebuilt the query from a set
+    would reorder a page a reader had ordered on purpose.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store_build(1, flaky={'editing/pasteboard/copy.html': config.CLEAN_TREE})
+        self.store_build(2, flaky={'fast/forms/input.html': config.CLEAN_TREE})
+        self.store_build(3, flaky={'fast/dom/node.html': config.CLEAN_TREE})
+
+    def removal_link(self, page: str, name: str) -> str:
+        """The href of the delete beside one clause, found by the accessible name it carries — an ×
+        alone is not a name, so the name is what a reader reaches it by and what this asserts on."""
+        found = re.search(rf'<a class="chip-remove" href="([^"]*)" aria-label="{re.escape(name)}"',
+                          page)
+        self.assertIsNotNone(found, f'no delete link named {name}')
+        return found.group(1).replace('&amp;', '&')
+
+    def clauses(self, link: str, argument: str) -> list:
+        return parse_qs(urlsplit(link).query).get(argument, [])
+
+    def test_removing_the_first_of_two_filters_leaves_the_second(self) -> None:
+        page = self.page(f'/tests?{FILTER}=test:has:fast&{FILTER}=test:nohas:forms')
+        link = self.removal_link(page, 'Remove filter 1')
+        self.assertEqual(self.clauses(link, FILTER), ['test:nohas:forms'])
+
+    def test_removing_the_second_of_two_filters_leaves_the_first(self) -> None:
+        page = self.page(f'/tests?{FILTER}=test:has:fast&{FILTER}=test:nohas:forms')
+        link = self.removal_link(page, 'Remove filter 2')
+        self.assertEqual(self.clauses(link, FILTER), ['test:has:fast'])
+
+    def test_removing_the_middle_of_three_filters_leaves_the_others_in_order(self) -> None:
+        page = self.page(f'/tests?{FILTER}=test:has:fast'
+                         f'&{FILTER}=convictions:ge:1'
+                         f'&{FILTER}=test:nohas:forms')
+        link = self.removal_link(page, 'Remove filter 2')
+        self.assertEqual(self.clauses(link, FILTER), ['test:has:fast', 'test:nohas:forms'])
+
+    def test_each_of_three_filters_offers_a_delete_that_drops_only_itself(self) -> None:
+        asked = ['test:has:fast', 'convictions:ge:1', 'test:nohas:forms']
+        page = self.page('/tests?' + '&'.join(f'{FILTER}={clause}' for clause in asked))
+        for position, dropped in enumerate(asked):
+            link = self.removal_link(page, f'Remove filter {position + 1}')
+            self.assertEqual(self.clauses(link, FILTER),
+                             [clause for clause in asked if clause != dropped], dropped)
+
+    def test_following_a_delete_actually_narrows_the_page_by_what_is_left(self) -> None:
+        """The link is the whole mechanism, so the page it lands on is what the assertion is worth:
+        the removed clause's rows come back and the kept clause still holds."""
+        page = self.page(f'/tests?{FILTER}=test:has:fast&{FILTER}=test:nohas:forms')
+        landed = self.page(self.removal_link(page, 'Remove filter 2'))
+        self.assertIn('fast/forms/input.html', landed)
+        self.assertIn('fast/dom/node.html', landed)
+        self.assertNotIn('editing/pasteboard/copy.html', landed)
+
+    def test_removing_a_sort_leaves_the_other_sort_and_every_filter(self) -> None:
+        page = self.page(f'/tests?{FILTER}=test:has:fast'
+                         f'&{SORT}=convictions:desc&{SORT}=test:asc')
+        link = self.removal_link(page, 'Remove sort 1')
+        self.assertEqual(self.clauses(link, SORT), ['test:asc'])
+        self.assertEqual(self.clauses(link, FILTER), ['test:has:fast'])
+
+    def test_removing_the_middle_of_three_sorts_leaves_the_others_in_order(self) -> None:
+        page = self.page(f'/tests?{SORT}=convictions:desc&{SORT}=queues:asc&{SORT}=test:asc')
+        link = self.removal_link(page, 'Remove sort 2')
+        self.assertEqual(self.clauses(link, SORT), ['convictions:desc', 'test:asc'])
+
+    def test_removing_a_filter_leaves_the_sorts_alone(self) -> None:
+        page = self.page(f'/tests?{FILTER}=test:has:fast&{FILTER}=test:nohas:forms'
+                         f'&{SORT}=convictions:desc')
+        link = self.removal_link(page, 'Remove filter 1')
+        self.assertEqual(self.clauses(link, SORT), ['convictions:desc'])
+
+    def test_a_delete_keeps_the_window_the_suite_and_the_queue_scope(self) -> None:
+        page = self.page(f'/tests?days=30&suite=layout-tests&family=Apple'
+                         f'&{FILTER}=test:has:fast&{FILTER}=test:nohas:forms')
+        arguments = parse_qs(urlsplit(self.removal_link(page, 'Remove filter 1')).query)
+        self.assertEqual(arguments['days'], ['30'])
+        self.assertEqual(arguments['suite'], ['layout-tests'])
+        self.assertEqual(arguments['family'], ['Apple'])
+
+    def test_a_blank_chip_offers_no_delete(self) -> None:
+        """There is no committed clause behind it, so there is nothing for a delete to remove."""
+        section = self.convicted_section(self.page('/tests?add_filter=1'))
+        self.assertEqual(self.chip_count(section, 'filter'), 1)
+        self.assertNotIn('chip-remove', section)
+
+    def test_a_delete_is_a_plain_internal_link_with_no_script_and_no_new_window(self) -> None:
+        """Removing the only clause leaves no clause argument at all, so this one is bare `/tests`
+        with the anchor the other deletes also carry."""
+        page = self.page(f'/tests?{FILTER}=test:has:fast')
+        found = re.search(r'<a class="chip-remove" href="([^"]*)"([^>]*)>', page)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.group(1), '/tests#convicted')
+        self.assertNotIn('target=', found.group(2))
+        self.assertNotIn('rel=', found.group(2))
+        self.assertNotIn('onclick', found.group(2))
+        self.assertIn('aria-label="Remove filter 1"', found.group(2))
+
+    def chip_count(self, section: str, kind: str) -> int:
+        row = re.search(rf'data-chip-kind="{kind}"[^>]*>(.*?)<button type="submit" name="add_{kind}"',
+                        section, re.S)
+        self.assertIsNotNone(row, f'no {kind} chip row')
+        return row.group(1).count('<span class="chip">')
+
+
 class TestTestsChipForm(WebTest):
     """The chip form submits the exploded per-control grammar; the route turns that back into the
     canonical `f./s.` spelling and redirects, so every link the page emits still speaks one grammar."""
@@ -2516,6 +2628,61 @@ class TestEscapesPaging(EscapeRows):
             page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:f1')
         self.assertIn('all 1 shown', page)
         self.assertNotIn('Page 1 of', page)
+
+
+class TestEscapesClauseRemoval(EscapeRows):
+    """The escapes listing's own deletes, which have two arguments to answer for that `/tests` does
+    not: the verdict category the pane has open, which a delete must keep, and `page`, which it must
+    not — a shorter filter is a different set, and row 201 of it is not row 201 of this one."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        for number, name in enumerate(('fast/dom/node.html', 'fast/forms/input.html',
+                                       'editing/pasteboard/copy.html'), start=1):
+            self._escape(number, name, runs_after=8, failed_after=number)
+
+    def removal_link(self, page: str, name: str) -> str:
+        found = re.search(rf'<a class="chip-remove" href="([^"]*)" aria-label="{re.escape(name)}"',
+                          page)
+        self.assertIsNotNone(found, f'no delete link named {name}')
+        return found.group(1).replace('&amp;', '&')
+
+    def test_removing_the_middle_of_three_filters_leaves_the_others_in_order(self) -> None:
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:fast'
+                         f'&{ESCAPE_FILTER}=runs_after:ge:1'
+                         f'&{ESCAPE_FILTER}=test:nohas:forms')
+        arguments = parse_qs(urlsplit(self.removal_link(page, 'Remove filter 2')).query)
+        self.assertEqual(arguments[ESCAPE_FILTER], ['test:has:fast', 'test:nohas:forms'])
+
+    def test_removing_the_first_of_two_filters_leaves_the_second(self) -> None:
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:fast'
+                         f'&{ESCAPE_FILTER}=test:nohas:forms')
+        arguments = parse_qs(urlsplit(self.removal_link(page, 'Remove filter 1')).query)
+        self.assertEqual(arguments[ESCAPE_FILTER], ['test:nohas:forms'])
+
+    def test_a_delete_keeps_the_open_category_and_drops_the_page(self) -> None:
+        page = self.page(f'/escapes?verdict={escapes.ESCAPED}&{PAGE}=2'
+                         f'&{ESCAPE_FILTER}=test:has:fast'
+                         f'&{ESCAPE_FILTER}=test:nohas:forms')
+        arguments = parse_qs(urlsplit(self.removal_link(page, 'Remove filter 1')).query)
+        self.assertEqual(arguments['verdict'], [escapes.ESCAPED])
+        self.assertNotIn(PAGE, arguments)
+
+    def test_following_a_delete_widens_the_listing_by_exactly_that_clause(self) -> None:
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:fast'
+                         f'&{ESCAPE_FILTER}=test:nohas:forms')
+        self.assertEqual(self.rows_rendered(page), 1)
+        landed = self.page(self.removal_link(page, 'Remove filter 2'))
+        self.assertEqual(self.rows_rendered(landed), 2)
+
+    def test_a_clause_this_page_cannot_read_is_still_named_rather_than_refused(self) -> None:
+        """A delete does not carry a rejected clause forward, which is what every other link here
+        already does — but the page it leaves still reports the one it was asked with."""
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=nonesuch:has:x'
+                         f'&{ESCAPE_FILTER}=test:has:fast')
+        self.assertIn('Ignored 1 filter this page cannot read: nonesuch:has:x', page)
+        arguments = parse_qs(urlsplit(self.removal_link(page, 'Remove filter 1')).query)
+        self.assertNotIn(ESCAPE_FILTER, arguments)
 
 
 class TestVocabularyLegend(WebTest):

@@ -189,6 +189,12 @@
                 {% else %}
                 <input type="{{ chip.input_type }}" name="{{ filter_chip_argument(escapes_table, chip.index, 'value') }}" class="chip-value" value="{{ chip.value }}" aria-label="Filter {{ loop.index }} value">
                 {% endif %}
+                {# A delete is a link, not a scripted button, so one clause can be dropped with the
+                   script blocked: its href is this request with this clause left out and the others
+                   in the order they were written. Named for the reader rather than left as a glyph,
+                   since × alone is not an accessible name, and internal so it carries neither
+                   target nor rel. A blank chip has none — there is nothing committed to remove. #}
+                {% if chip.removal %}<a class="chip-remove" href="{{ chip.removal }}" aria-label="Remove filter {{ loop.index }}" title="Remove this filter">&times;</a>{% endif %}
               </span>
               {% endfor %}
             </span>
@@ -209,6 +215,7 @@
                   <option value="asc"{{ ' selected' if chip.direction == 'asc' }}>Ascending</option>
                   <option value="desc"{{ ' selected' if chip.direction == 'desc' }}>Descending</option>
                 </select>
+                {% if chip.removal %}<a class="chip-remove" href="{{ chip.removal }}" aria-label="Remove sort {{ loop.index }}" title="Remove this sort">&times;</a>{% endif %}
               </span>
               {% endfor %}
             </span>

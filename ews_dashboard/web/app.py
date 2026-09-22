@@ -187,10 +187,12 @@ class FilterChip:
     operators: tuple
     vocabulary: Optional[tuple]
     input_type: str
+    removal: Optional[str] = None
 
 
 def _filter_chip(index: int, condition: Optional[filters.Condition],
-                 clause: Optional[str] = None) -> FilterChip:
+                 clause: Optional[str] = None,
+                 removal: Optional[str] = None) -> FilterChip:
     """One committed condition as a chip, or a blank chip where there is none.
 
     The value comes from `clause` — the reader's own text — rather than `condition.values`, which
@@ -201,6 +203,9 @@ def _filter_chip(index: int, condition: Optional[filters.Condition],
     like `suite` takes both a one-value operator (`eq`) and a many-value one (`in`), and only the
     operator a reader actually chose says which control the value belongs in. `values` is `value`
     split back into the elements a many-value operator's own vocabulary select preselects.
+
+    `removal` is where this one clause's delete link points: this request minus this clause and
+    nothing else. A blank chip has none, because there is no committed clause behind it to remove.
     """
     if condition is None:
         return FilterChip(index=index, column=None, operator=None, value='', values=(),
@@ -214,13 +219,16 @@ def _filter_chip(index: int, condition: Optional[filters.Condition],
                       value=value, values=values, many_values=many_values,
                       operators=tuple(column.operators.values()),
                       vocabulary=column.vocabulary,
-                      input_type=CHIP_INPUT_TYPES.get(column.kind, 'text'))
+                      input_type=CHIP_INPUT_TYPES.get(column.kind, 'text'),
+                      removal=removal)
 
 
-def _filter_chips(asked: filters.Requested, extra: int) -> tuple:
+def _filter_chips(asked: filters.Requested, extra: int, removals: tuple = ()) -> tuple:
     """Every filter chip the surface shows: one per committed condition, then `extra` blank ones."""
-    chips = [_filter_chip(index, condition, clause) for index, (condition, clause)
-            in enumerate(zip(asked.conditions, asked.filter_clauses))]
+    chips = [_filter_chip(index, condition, clause,
+                          removals[index] if index < len(removals) else None)
+             for index, (condition, clause)
+             in enumerate(zip(asked.conditions, asked.filter_clauses))]
     for _ in range(extra):
         chips.append(_filter_chip(len(chips), None))
     return tuple(chips)
@@ -229,26 +237,73 @@ def _filter_chips(asked: filters.Requested, extra: int) -> tuple:
 @dataclass(frozen=True)
 class SortChip:
     """One row of the sort surface: the column and direction a request committed at this index, or
-    the blanks of one not yet filled in."""
+    the blanks of one not yet filled in.
+
+    `removal` is this one clause's delete link, absent on a blank chip for the same reason it is on a
+    blank filter chip: there is no committed clause behind it.
+    """
 
     index: int
     column: Optional[str]
     direction: Optional[str]
+    removal: Optional[str] = None
 
 
-def _sort_chip(index: int, key: Optional[filters.SortKey]) -> SortChip:
+def _sort_chip(index: int, key: Optional[filters.SortKey],
+               removal: Optional[str] = None) -> SortChip:
     if key is None:
         return SortChip(index=index, column=None, direction=None)
     return SortChip(index=index, column=key.column.name,
-                    direction=filters.DESCENDING if key.descending else filters.ASCENDING)
+                    direction=filters.DESCENDING if key.descending else filters.ASCENDING,
+                    removal=removal)
 
 
-def _sort_chips(asked: filters.Requested, extra: int) -> tuple:
+def _sort_chips(asked: filters.Requested, extra: int, removals: tuple = ()) -> tuple:
     """Every sort chip the surface shows: one per committed key, then `extra` blank ones."""
-    chips = [_sort_chip(index, key) for index, key in enumerate(asked.sort_keys)]
+    chips = [_sort_chip(index, key, removals[index] if index < len(removals) else None)
+             for index, key in enumerate(asked.sort_keys)]
     for _ in range(extra):
         chips.append(_sort_chip(len(chips), None))
     return tuple(chips)
+
+
+def _clause_removals(endpoint: str, table: filters.Table, asked: filters.Requested,
+                     anchor: str) -> tuple:
+    """`(filter_urls, sort_urls)`: for each committed clause, this request minus that one clause.
+
+    A delete has to be a plain link, because every other control on this surface works with the
+    script blocked and a scripted button would be the one that does not. So the whole of it is a URL
+    the server already knows how to answer: the clauses are respelled in `asked`'s own written order
+    with one index left out, which is what keeps removing the second of three from reordering the
+    first and the third.
+
+    Everything else the request carries is kept, apart from three arguments a delete has no business
+    forwarding: the `+filter`/`+sort` presses, which asked the page that rendered for one more blank
+    chip, and `page`, since a narrower filter is a different set and row 201 of it is not row 201 of
+    this one. A clause that did not parse is not carried either — `asked.filter_clauses` holds only
+    what committed — which is the same judgment every other link on these pages makes.
+    """
+    filter_argument = filters.filter_argument(table)
+    sort_argument = filters.sort_argument(table)
+    filter_stem = f'{filter_argument}{filters.CLAUSE_SEPARATOR}'
+    sort_stem = f'{sort_argument}{filters.CLAUSE_SEPARATOR}'
+    dropped = (filter_argument, sort_argument, ADD_FILTER_ARGUMENT, ADD_SORT_ARGUMENT,
+               PAGE_ARGUMENT)
+    kept = {name: values for name, values in _carried_arguments().items()
+            if name not in dropped
+            and not name.startswith(filter_stem) and not name.startswith(sort_stem)}
+    filter_clauses, sort_clauses = list(asked.filter_clauses), list(asked.sort_clauses)
+
+    def target(filters_asked: list, sorts_asked: list) -> str:
+        return url_for(endpoint, **kept, _anchor=anchor,
+                       **{filter_argument: filters_asked, sort_argument: sorts_asked})
+
+    return (
+        tuple(target(filter_clauses[:index] + filter_clauses[index + 1:], sort_clauses)
+              for index in range(len(filter_clauses))),
+        tuple(target(filter_clauses, sort_clauses[:index] + sort_clauses[index + 1:])
+              for index in range(len(sort_clauses))),
+    )
 
 
 def _canonical_filter_arguments(table: filters.Table) -> object:
@@ -604,6 +659,7 @@ def _tests_context(open_connection: sqlite3.Connection, window: Window) -> dict:
     suite, builders = scope.suite, scope.builders
     test_filter = request.args.get('test') or None
     asked = filters.requested(_canonical_filter_arguments(filters.TESTS), filters.TESTS)
+    filter_removals, sort_removals = _clause_removals('tests', filters.TESTS, asked, 'convicted')
     primary = _primary_sort(filters.TESTS, asked.sort_keys, DEFAULT_SORT)
     convicted = convictions.convicted_tests(
         open_connection, window.since, window.until,
@@ -639,8 +695,10 @@ def _tests_context(open_connection: sqlite3.Connection, window: Window) -> dict:
         current_args=_carried_arguments(),
         filter_argument=filters.filter_argument(filters.TESTS),
         sort_argument=filters.sort_argument(filters.TESTS),
-        filter_chips=_filter_chips(asked, 1 if ADD_FILTER_ARGUMENT in request.args else 0),
-        sort_chips=_sort_chips(asked, 1 if ADD_SORT_ARGUMENT in request.args else 0),
+        filter_chips=_filter_chips(asked, 1 if ADD_FILTER_ARGUMENT in request.args else 0,
+                                  filter_removals),
+        sort_chips=_sort_chips(asked, 1 if ADD_SORT_ARGUMENT in request.args else 0,
+                               sort_removals),
         add_filter_argument=ADD_FILTER_ARGUMENT,
         add_sort_argument=ADD_SORT_ARGUMENT,
         filter_chip_argument=filters.filter_chip_argument,
@@ -735,6 +793,8 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
     scope = _scope(open_connection, window)
     verdict_shown = escapes.category_of(_chosen('verdict', escapes.VERDICTS, escapes.ESCAPED))
     asked = filters.requested(_canonical_filter_arguments(filters.ESCAPES), filters.ESCAPES)
+    filter_removals, sort_removals = _clause_removals('escaped_regressions', filters.ESCAPES, asked,
+                                                      'convictions')
     shows_increase = verdict_shown == escapes.ESCAPED
     primary = _primary_sort(filters.ESCAPES, asked.sort_keys,
                             ESCAPES_DEFAULT_SORT if shows_increase
@@ -780,8 +840,10 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
         page_argument=PAGE_ARGUMENT,
         filter_argument=filters.filter_argument(filters.ESCAPES),
         sort_argument=filters.sort_argument(filters.ESCAPES),
-        filter_chips=_filter_chips(asked, 1 if ADD_FILTER_ARGUMENT in request.args else 0),
-        sort_chips=_sort_chips(asked, 1 if ADD_SORT_ARGUMENT in request.args else 0),
+        filter_chips=_filter_chips(asked, 1 if ADD_FILTER_ARGUMENT in request.args else 0,
+                                  filter_removals),
+        sort_chips=_sort_chips(asked, 1 if ADD_SORT_ARGUMENT in request.args else 0,
+                               sort_removals),
         add_filter_argument=ADD_FILTER_ARGUMENT,
         add_sort_argument=ADD_SORT_ARGUMENT,
         filter_chip_argument=filters.filter_chip_argument,

@@ -970,12 +970,17 @@ code {
    line the reader already follows down the block. The label column is a fixed width rather than
    `max-content` so the disclosure's own toggle, which sits above the grid and cannot join it (the
    content of a `details` is laid out inside `::details-content`, so `display: contents` on this form
-   would not reach a grid on the `details`), still falls inside that column. */
+   would not reach a grid on the `details`), still falls inside that column.
+
+   Aligned on the first baseline rather than centred, because a chip row is now a column of clauses
+   rather than one line: centring put "Filter" and "+ filter" against the middle of a three-clause
+   stack, level with the second clause and reading as a label for it. On a baseline they sit against
+   the first clause whatever the stack's height. */
 .table-filter .chip-form {
     --chip-label-column: 3.5rem;
     display: grid;
     grid-template-columns: var(--chip-label-column) minmax(0, auto) max-content minmax(0, 1fr);
-    align-items: center;
+    align-items: baseline;
     column-gap: 8px;
     row-gap: 6px;
 }
@@ -1003,9 +1008,16 @@ code {
     gap: 6px;
 }
 
+/* One clause per row, stacked downwards. Flowing them sideways meant a third clause ran out of the
+   header's width and wrapped into a ragged block whose clauses no longer read as a list. A column
+   gives every clause the same left edge, which is the same edge Apply and the sentence below already
+   take, and `stretch` gives them all one width from the widest — so each clause's delete sits on one
+   right edge instead of wherever that clause's own operator dropdown happened to end. */
 .table-filter .chip-form .chip-row {
     grid-column: 2;
     min-width: 0;
+    flex-direction: column;
+    align-items: stretch;
 }
 
 .table-filter .chip-form .chip-add {
@@ -1056,6 +1068,36 @@ code {
     appearance: none;
     -webkit-appearance: none;
     margin: 0;
+}
+
+/* One clause's own delete, parked at the chip's right edge by its own auto margin so the column of
+   them shares that edge. Sized to a control's height rather than to the glyph, so it is a target a
+   pointer can hit and a focus ring has a box to draw around; the underline every link in this file
+   takes on hover is dropped, because a one-glyph link underlines as a stray mark. */
+.chip-remove {
+    margin-left: auto;
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.6em;
+    height: 1.9em;
+    border-radius: var(--radius-small);
+    color: var(--faint);
+    font-size: 1.05em;
+    line-height: 1;
+}
+
+.chip-remove:hover,
+.chip-remove:focus {
+    background: var(--panel-hover);
+    color: var(--ink);
+    text-decoration: none;
+}
+
+.chip-remove:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 1px;
 }
 
 .table-filter .actions {
