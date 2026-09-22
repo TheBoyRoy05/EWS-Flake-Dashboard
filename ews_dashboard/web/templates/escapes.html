@@ -72,7 +72,7 @@
 
 <div class="row metrics">
   <div class="col-4 metric">
-    <div class="text tiny label">Convictions main disagreed with</div>
+    <div class="text tiny label">Convictions main failed the test after</div>
     {{ rate(tally.escape_rate_pct, tally.escaped, tally.decided, 'convictions main answered') }}
   </div>
   <div class="col-4 metric">
@@ -94,15 +94,20 @@
       <span class="tally">{{ tally.asked | count }} convictions</span>
     </div>
     <div class="body">
-      {% for verdict in verdicts %}
-      <a class="entry{{ ' selected' if verdict == verdict_shown }}" title="{{ verdict_descriptions[verdict] }}" href="{{ url_for('escaped_regressions', days=window.days, suite=suite, **dict(filter_args, verdict=verdict)) }}">
+      {% for category in categories %}
+      <a class="entry{{ ' selected' if category == verdict_shown }}" title="{{ verdict_descriptions[category] }}" href="{{ url_for('escaped_regressions', days=window.days, suite=suite, **dict(filter_args, verdict=category)) }}">
         <span class="line">
-          <span class="label"><span class="state {{ verdict | state_class }}">{{ verdict }}</span></span>
-          <span class="tally">{{ tally.by_verdict[verdict] | count }}</span>
+          <span class="label"><span class="state {{ category | state_class }}">{{ category }}</span></span>
+          <span class="tally">{{ category_counts[category] | count }}</span>
         </span>
       </a>
-      {% if verdict == escaped_verdict and subcategories.total %}
+      {% if category == escaped_verdict and subcategories.total %}
       <div class="subcategories">
+        <span class="split text tiny" title="One landed regression makes a fresh conviction on every later pull request whose build trips the same test, so these convictions count more loudly than the regressions behind them.">these convictions name</span>
+        <span class="line text tiny"><span class="label">distinct tests</span><span class="tally">{{ subcategories.distinct_tests | count }}</span></span>
+        <span class="split text tiny">and before the landing main</span>
+        <span class="line text tiny" title="Stored as ESCAPED: main ran the test before the landing and never failed it."><span class="label">was not failing it</span><span class="tally">{{ subcategories.baseline_clean | count }}</span></span>
+        <span class="line text tiny" title="Stored as FAILS_ON_MAIN: main had already failed the test before the landing, at any rate at all. One failure in a long clean baseline is enough to land here, which is why this is a split under the bucket and no longer a bucket of its own."><span class="label">was already failing it</span><span class="tally">{{ subcategories.baseline_failing | count }}</span></span>
         <span class="split text tiny">of those, main now</span>
         <span class="line text tiny"><span class="label">still failing it</span><span class="tally">{{ subcategories.still_failing | count }}</span></span>
         <span class="line text tiny"><span class="label">has stopped failing it</span><span class="tally">{{ subcategories.recovered | count }}</span></span>
@@ -248,8 +253,8 @@
               {% if conviction.pr_id %}<a href="{{ links.pull_request(conviction.pr_id) }}" target="_blank" rel="noopener">PR</a>{% endif %}
               <a href="{{ links.test_investigation(conviction.configuration, conviction.test_name) }}" target="_blank" rel="noopener">History</a>
             </td>
-            <td class="numeric text tiny">{% if conviction.verdict != escaped_verdict or conviction.strength is none %}—{% else %}{{ (conviction.strength * 100) | round(1) | percent }}<span class="evidence">{{ conviction.failed_after }}/{{ conviction.runs_after }}</span>{% endif %}</td>
-            <td class="numeric text tiny">{% if conviction.verdict != escaped_verdict or conviction.damage is none %}—{% else %}{{ (conviction.damage * 100) | round(1) | percent }}<span class="evidence">{{ conviction.recent_failed }}/{{ conviction.recent_runs }}</span>{% endif %}</td>
+            <td class="numeric text tiny">{% if conviction.verdict not in escape_verdicts or conviction.strength is none %}—{% else %}{{ (conviction.strength * 100) | round(1) | percent }}<span class="evidence">{{ conviction.failed_after }}/{{ conviction.runs_after }}</span>{% endif %}</td>
+            <td class="numeric text tiny">{% if conviction.verdict not in escape_verdicts or conviction.damage is none %}—{% else %}{{ (conviction.damage * 100) | round(1) | percent }}<span class="evidence">{{ conviction.recent_failed }}/{{ conviction.recent_runs }}</span>{% endif %}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -274,7 +279,7 @@
     <details class="caveats-disclosure">
       <summary>How an escape is decided, and what this page cannot see</summary>
       <div class="caveats text tiny">
-        <p>An escape is a test main failed after the landing and never failed before it. The baseline says whose failure it is; the rate only says how sure — {{ failure_pct }}% or more of the runs after is strong, less than that rests on few failures. Already failing before the landing makes it main's own, not the change's. Whether main is still failing the test is asked separately, over the last {{ currency_days }} days and of the escapes alone, and answers four ways: still failing, stopped failing, not run in that window at all, or not yet asked about. The last two measure nothing, so neither is counted as a recovery.</p>
+        <p>An escape is a test main failed after the landing, whether or not main had failed it before. What the baseline said is the split under the bucket — was not failing it, or was already failing it — and no longer two separate buckets: one failure in a long clean baseline was all that separated them, and that is not a difference a reader is looking for. The rate says how sure — {{ failure_pct }}% or more of the runs after is strong, less than that rests on few failures. The distinct-test count is beside the conviction count because one landed regression makes a fresh conviction on every later pull request whose build trips the same test. Whether main is still failing the test is asked separately, over the last {{ currency_days }} days, and answers four ways: still failing, stopped failing, not run in that window at all, or not yet asked about. The last two measure nothing, so neither is counted as a recovery, and today only the clean-baseline half has ever been asked.</p>
         <p>A floor, like every number here: only landings pinned from a PR title, only tests a bot runs on main in the same configuration, only the {{ window_days }} days either side. Undecided convictions are counted above, not dropped.</p>
       </div>
     </details>

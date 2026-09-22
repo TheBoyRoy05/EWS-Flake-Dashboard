@@ -683,17 +683,26 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
     The listing is filtered, ordered and paged by the `f.escapes=`/`s.escapes=`/`page=` arguments,
     every column name in them validated against `filters.ESCAPES` before any of it reaches SQL. The
     verdict category the pane selects is applied on top of a reader's own clauses rather than by
-    them, so a `verdict` clause naming a different bucket narrows this page to nothing and says so —
-    see the ticket in docs/open-work.md about folding the pane's own `verdict=` into the grammar.
+    them, so a `verdict` clause naming a bucket outside the open category narrows this page to
+    nothing and says so — see the ticket in docs/open-work.md about folding the pane's own `verdict=`
+    into the grammar. The one pairing that does now intersect is a `verdict` clause naming either
+    half of the merged ESCAPED category, which is how a reader asks for that half on its own.
+
+    The category is chosen from `escapes.CATEGORIES`, not from the stored verdict names, since
+    FAILS_ON_MAIN is no longer a bucket of its own; a link that still names it opens the merged
+    bucket that holds it rather than falling back to the default.
     """
     scope = _scope(open_connection, window)
-    verdict_shown = _chosen('verdict', escapes.VERDICTS, escapes.ESCAPED)
+    verdict_shown = escapes.category_of(_chosen('verdict', escapes.VERDICTS, escapes.ESCAPED))
     asked = filters.requested(_canonical_filter_arguments(filters.ESCAPES), filters.ESCAPES)
     primary = _primary_sort(filters.ESCAPES, asked.sort_keys, ESCAPES_DEFAULT_SORT)
-    listed = escapes.convictions(open_connection, window.since, window.until, verdict_shown,
+    listed = escapes.convictions(open_connection, window.since, window.until,
+                                 escapes.category_verdicts(verdict_shown),
                                  suite=scope.suite, builders=scope.builders,
                                  page=_page_asked_for(), conditions=asked.conditions,
                                  sort_keys=_escape_order(asked.sort_keys))
+    counted = escapes.tally(open_connection, window.since, window.until,
+                            suite=scope.suite, builders=scope.builders)
     return dict(
         window=window,
         window_choices=WINDOW_CHOICES,
@@ -702,16 +711,17 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
         **_selection_args(scope.selection),
         queue_tree=scope.tree,
         queue_summary=scope.summary,
-        tally=escapes.tally(open_connection, window.since, window.until,
-                            suite=scope.suite, builders=scope.builders),
+        tally=counted,
+        category_counts=counted.by_category,
         escaped_verdict=escapes.ESCAPED,
+        escape_verdicts=escapes.MERGED_ESCAPE_VERDICTS,
         subcategories=escapes.escape_subcategories(open_connection, window.since, window.until,
                                                    suite=scope.suite, builders=scope.builders),
         listed=listed,
         verdict_shown=verdict_shown,
         sentence=escapes.sentence,
         verdict_descriptions=escapes.VERDICT_DESCRIPTIONS,
-        verdicts=escapes.VERDICTS,
+        categories=escapes.CATEGORIES,
         window_days=config.ESCAPE_WINDOW_DAYS,
         failure_pct=config.ESCAPE_FAILURE_PCT,
         currency_days=config.CURRENCY_DAYS,

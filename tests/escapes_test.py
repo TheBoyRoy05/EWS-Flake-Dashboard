@@ -199,17 +199,21 @@ class TestRedecided(fixtures.DatabaseTest):
 class TestTally(fixtures.DatabaseTest):
     """What a window's verdicts come to, and which of them the escape rate is taken over."""
 
-    def test_a_test_main_fails_without_the_change_is_counted_in_the_rate(self) -> None:
-        """Main failing a test whether the change is there or not vindicates the conviction, so it
-        belongs in the denominator rather than among the convictions main answered nothing about."""
+    def test_a_test_main_failed_before_the_change_too_is_counted_in_the_rate(self) -> None:
+        """A conviction main answered by failing the test is in the numerator as well as the
+        denominator now: FAILS_ON_MAIN is the already-failing half of the escape bucket rather than a
+        bucket that vindicates the conviction, so it can be in neither of the two groups the rate
+        leaves out — the undecided ones, and the ones outside the numerator."""
         self.assertNotIn(escapes.FAILS_ON_MAIN, escapes.UNDECIDED_VERDICTS)
+        self.assertIn(escapes.FAILS_ON_MAIN, escapes.MERGED_ESCAPE_VERDICTS)
         tally = escapes.Tally(
             by_verdict={escapes.ESCAPED: 0, escapes.FAILS_ON_MAIN: 5, escapes.CONTAINED: 39,
                         escapes.NO_RUNS: 2},
             unaskable={},
         )
         self.assertEqual((tally.decided, tally.undecided), (44, 2))
-        self.assertEqual(tally.escape_rate_pct, 0.0)
+        self.assertEqual(tally.escaped, 5)
+        self.assertEqual(tally.escape_rate_pct, round(100.0 * 5 / 44, 1))
 
     def test_what_was_asked_counts_the_convictions_no_answer_came_back_about(self) -> None:
         """The buckets divide up every conviction main was asked about, so their total has to hold
@@ -378,10 +382,12 @@ class TestSubcategories(fixtures.DatabaseTest):
         self.assertEqual(escapes.verdict_for_counts(152, 0, 0, 0), escapes.NO_RUNS)
         self.assertIsNotNone(escapes.rarity_for_counts(1, 1))
 
-    def test_no_other_verdict_is_counted_in_the_split(self) -> None:
+    def test_no_verdict_outside_the_merged_bucket_is_counted_in_the_split(self) -> None:
+        """CONTAINED is not in the bucket the splits divide; FAILS_ON_MAIN is, since it is the
+        already-failing half of it."""
         self._escape(1, runs_after=96, failed_after=0, verdict=escapes.CONTAINED)
         self._escape(2, runs_after=96, failed_after=48, verdict=escapes.FAILS_ON_MAIN)
-        self.assertEqual(self._subcategories().total, 0)
+        self.assertEqual(self._subcategories().total, 1)
 
     def test_a_queue_the_page_is_narrowed_to_narrows_the_split_too(self) -> None:
         self._escape(1, runs_after=96, failed_after=90)
@@ -776,14 +782,17 @@ class TestSentence(fixtures.DatabaseTest):
 
     def test_a_fails_on_main_verdict_reports_both_rates(self) -> None:
         """The rate either side is where a reader now tells a flaky test from a broken one, so both
-        have to be in the sentence."""
-        self.assertIn('failed it 14 of 99 runs after the landing vs. 6 of 88 before',
-                      _prose(escapes.sentence(_conviction(escapes.FAILS_ON_MAIN, runs_before=88,
-                                                          failed_before=6, runs_after=99,
-                                                          failed_after=14))))
+        have to be in the sentence — and no conclusion may be drawn from them, since this row sits in
+        the same bucket as an ESCAPED one and one failure in a long clean baseline is what put it
+        here."""
+        prose = _prose(escapes.sentence(_conviction(escapes.FAILS_ON_MAIN, runs_before=88,
+                                                   failed_before=6, runs_after=99,
+                                                   failed_after=14)))
+        self.assertIn('failed it 14 of 99 runs after the landing, and 6 of 88 before it', prose)
+        self.assertNotIn('not this change', prose)
 
     def test_a_fails_on_main_verdict_reads_the_same_for_a_baseline_main_was_broken_on(self) -> None:
-        self.assertIn('failed it 90 of 96 runs after the landing vs. 90 of 96 before',
+        self.assertIn('failed it 90 of 96 runs after the landing, and 90 of 96 before it',
                       _prose(escapes.sentence(_conviction(escapes.FAILS_ON_MAIN, runs_before=96,
                                                           failed_before=90, runs_after=96,
                                                           failed_after=90))))
@@ -1260,3 +1269,159 @@ class TestListingPages(fixtures.DatabaseTest):
         defect paging exists to close."""
         self._convict_many(3)
         self.assertEqual(self._page(1, limit=0).shown, 1)
+
+
+class TestMergedEscapeCategory(fixtures.DatabaseTest):
+    """ESCAPED and FAILS_ON_MAIN as one listed bucket, with the baseline demoted to a split.
+
+    The stored verdicts are untouched by the fold — nothing here writes a verdict the assess pass did
+    not — so every test in this class stores both names and asks what the page makes of them.
+    """
+
+    def _convict(self, number: int, test_name: str, verdict: str, runs_after: int = 96,
+                 failed_after: int = 48, failed_before: int = 0,
+                 recent_runs: Optional[int] = None,
+                 recent_failed: Optional[int] = None) -> int:
+        build_id = self.store_build(number, flaky={test_name: config.CLEAN_TREE}, pr_id=number,
+                                    pr_title='A change that landed', sha='a' * 40)
+        with self.connection:
+            self.connection.execute(
+                '''INSERT INTO escape_verdicts (
+                    build_id, test_name, verdict, runs_before, failed_before, runs_after,
+                    failed_after, landed_at, window_ends_at, decided_at, recent_runs,
+                    recent_failed, recent_checked_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (build_id, test_name, verdict, 100, failed_before, runs_after, failed_after,
+                 LANDED_AT, LANDED_AT + escapes.ESCAPE_WINDOW_SECONDS, LANDED_AT, recent_runs,
+                 recent_failed, LANDED_AT if recent_runs is not None else None),
+            )
+        return build_id
+
+    def _tally(self) -> escapes.Tally:
+        return escapes.tally(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                             fixtures.DEFAULT_BUILD_TIME + DAY)
+
+    def _subcategories(self) -> escapes.Subcategories:
+        return escapes.escape_subcategories(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                            fixtures.DEFAULT_BUILD_TIME + DAY)
+
+    def _names(self, category: str, conditions: tuple = ()) -> list:
+        return [one.test_name for one in escapes.convictions(
+            self.connection, fixtures.DEFAULT_BUILD_TIME - DAY, fixtures.DEFAULT_BUILD_TIME + DAY,
+            escapes.category_verdicts(category), conditions=conditions).convictions]
+
+    def test_the_listed_categories_partition_every_stored_verdict_exactly_once(self) -> None:
+        """A verdict in no category would vanish from the pane, and one in two would be counted
+        twice; the pane's tally is a sum over `by_verdict`, so both failures would be silent."""
+        listed = [verdict for category in escapes.CATEGORIES
+                  for verdict in escapes.category_verdicts(category)]
+        self.assertEqual(sorted(listed), sorted(escapes.VERDICTS))
+        self.assertEqual(len(listed), len(set(listed)))
+
+    def test_fails_on_main_is_not_a_category_of_its_own_but_is_shown_under_escaped(self) -> None:
+        self.assertNotIn(escapes.FAILS_ON_MAIN, escapes.CATEGORIES)
+        self.assertIn(escapes.FAILS_ON_MAIN, escapes.category_verdicts(escapes.ESCAPED))
+        self.assertEqual(escapes.category_of(escapes.FAILS_ON_MAIN), escapes.ESCAPED)
+
+    def test_a_stored_verdict_this_page_does_not_list_still_stands_for_itself(self) -> None:
+        """So a caller narrowing by a stored name gets that name's rows rather than no rows."""
+        self.assertEqual(escapes.category_verdicts(escapes.CONTAINED), (escapes.CONTAINED,))
+        self.assertEqual(escapes.category_of(escapes.CONTAINED), escapes.CONTAINED)
+
+    def test_the_escaped_category_counts_both_halves_as_one_bucket(self) -> None:
+        self._convict(1, 'fast/clean.html', escapes.ESCAPED)
+        self._convict(2, 'fast/already.html', escapes.FAILS_ON_MAIN, failed_before=1)
+        self._convict(3, 'fast/other.html', escapes.FAILS_ON_MAIN, failed_before=7)
+        self._convict(4, 'fast/contained.html', escapes.CONTAINED, failed_after=0)
+
+        counted = self._tally()
+
+        self.assertEqual(counted.by_category[escapes.ESCAPED], 3)
+        self.assertEqual(counted.escaped, 3)
+        self.assertEqual(counted.by_category[escapes.CONTAINED], 1)
+        self.assertNotIn(escapes.FAILS_ON_MAIN, counted.by_category)
+
+    def test_the_stored_counts_are_left_exactly_as_the_assess_pass_wrote_them(self) -> None:
+        """The fold is what the page shows, not a rewrite: that is what makes it reversible."""
+        self._convict(1, 'fast/already.html', escapes.FAILS_ON_MAIN, failed_before=1)
+        self._tally()
+        self._subcategories()
+        self._names(escapes.ESCAPED)
+        stored = self.connection.execute(
+            'SELECT verdict, failed_before FROM escape_verdicts').fetchall()
+        self.assertEqual([(row['verdict'], row['failed_before']) for row in stored],
+                         [(escapes.FAILS_ON_MAIN, 1)])
+
+    def test_a_category_with_no_conviction_in_either_half_reads_as_a_zero(self) -> None:
+        self._convict(1, 'fast/contained.html', escapes.CONTAINED, failed_after=0)
+        self.assertEqual(self._tally().by_category[escapes.ESCAPED], 0)
+
+    def test_the_listing_shows_both_halves_under_the_one_category(self) -> None:
+        self._convict(1, 'fast/clean.html', escapes.ESCAPED)
+        self._convict(2, 'fast/already.html', escapes.FAILS_ON_MAIN, failed_before=1)
+        self._convict(3, 'fast/contained.html', escapes.CONTAINED, failed_after=0)
+        self.assertEqual(sorted(self._names(escapes.ESCAPED)),
+                         ['fast/already.html', 'fast/clean.html'])
+
+    def test_a_verdict_filter_still_reaches_either_half_on_its_own(self) -> None:
+        """The reader's own clause is applied on top of the category, so the merged bucket is not a
+        one-way door: asking for one stored name returns that name's rows and only those."""
+        self._convict(1, 'fast/clean.html', escapes.ESCAPED)
+        self._convict(2, 'fast/already.html', escapes.FAILS_ON_MAIN, failed_before=1)
+        for verdict, expected in ((escapes.FAILS_ON_MAIN, ['fast/already.html']),
+                                  (escapes.ESCAPED, ['fast/clean.html'])):
+            conditions = filters.parse(filters.ESCAPES, (('verdict', 'eq', verdict),))
+            self.assertEqual(len(conditions), 1, f'{verdict} did not parse as a verdict filter')
+            self.assertEqual(self._names(escapes.ESCAPED, conditions=conditions), expected)
+
+    def test_the_baseline_split_partitions_the_merged_bucket(self) -> None:
+        self._convict(1, 'fast/clean.html', escapes.ESCAPED)
+        self._convict(2, 'fast/already.html', escapes.FAILS_ON_MAIN, failed_before=1)
+        self._convict(3, 'fast/other.html', escapes.FAILS_ON_MAIN, failed_before=7)
+        self._convict(4, 'fast/contained.html', escapes.CONTAINED, failed_after=0)
+
+        split = self._subcategories()
+
+        self.assertEqual((split.baseline_clean, split.baseline_failing), (1, 2))
+        self.assertEqual(split.baseline_total, 3)
+        self.assertEqual(split.baseline_total, split.total)
+        self.assertEqual(split.baseline_total, split.rate_total)
+
+    def test_every_split_is_counted_over_the_whole_merged_bucket(self) -> None:
+        """A split counted over less than the bucket above it would print partitions of a number that
+        is not the one on the entry."""
+        self._convict(1, 'fast/clean.html', escapes.ESCAPED, recent_runs=18, recent_failed=11)
+        self._convict(2, 'fast/already.html', escapes.FAILS_ON_MAIN, failed_before=1)
+
+        split = self._subcategories()
+
+        self.assertEqual((split.still_failing, split.unchecked), (1, 1))
+        self.assertEqual(split.total, 2)
+        self.assertEqual(split.rate_total, 2)
+
+    def test_the_distinct_test_count_is_the_tests_and_not_the_convictions(self) -> None:
+        """One landed regression makes a fresh conviction on every later pull request whose build
+        trips the same test, so the two numbers are far apart and printing only the convictions
+        invites reading them as separate regressions."""
+        self._convict(1, 'fast/poisoned.html', escapes.ESCAPED)
+        self._convict(2, 'fast/poisoned.html', escapes.FAILS_ON_MAIN, failed_before=1)
+        self._convict(3, 'fast/poisoned.html', escapes.FAILS_ON_MAIN, failed_before=2)
+        self._convict(4, 'fast/other.html', escapes.FAILS_ON_MAIN, failed_before=1)
+
+        split = self._subcategories()
+
+        self.assertEqual(split.total, 4)
+        self.assertEqual(split.distinct_tests, 2)
+
+    def test_the_distinct_test_count_is_narrowed_with_the_bucket_it_describes(self) -> None:
+        self._convict(1, 'fast/clean.html', escapes.ESCAPED)
+        self.assertEqual(escapes.escape_subcategories(
+            self.connection, fixtures.DEFAULT_BUILD_TIME - DAY, fixtures.DEFAULT_BUILD_TIME + DAY,
+            builders=(fixtures.GTK_BUILDER,)).distinct_tests, 0)
+        self.assertEqual(escapes.escape_subcategories(
+            self.connection, fixtures.DEFAULT_BUILD_TIME - DAY, fixtures.DEFAULT_BUILD_TIME + DAY,
+            builders=(fixtures.LAYOUT_BUILDER,)).distinct_tests, 1)
+
+    def test_an_empty_bucket_names_no_tests(self) -> None:
+        self._convict(1, 'fast/contained.html', escapes.CONTAINED, failed_after=0)
+        self.assertEqual(self._subcategories().distinct_tests, 0)

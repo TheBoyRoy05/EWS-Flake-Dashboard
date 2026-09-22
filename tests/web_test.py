@@ -1558,18 +1558,20 @@ class TestEscapes(WebTest):
         self.assertEqual(self.selected_category(self.page(f'/escapes?verdict={escapes.NO_RUNS}')),
                          escapes.NO_RUNS)
 
-    def test_every_verdict_is_a_category_even_the_ones_nothing_reached(self) -> None:
+    def test_every_category_is_listed_even_the_ones_nothing_reached(self) -> None:
         """A bucket nothing landed in has to read as a zero rather than vanish, or a reader cannot
-        tell an empty bucket from one this page never checks."""
+        tell an empty bucket from one this page never checks. FAILS_ON_MAIN is not among them: it is
+        half of ESCAPED now, so a pill of its own would be a bucket counted twice."""
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.CONTAINED, failed_after=0)
         page = self.page('/escapes')
-        for verdict in escapes.VERDICTS:
+        for verdict in escapes.CATEGORIES:
             expected = 1 if verdict == escapes.CONTAINED else 0
             self.assertRegex(page, rf'state-{verdict}">{verdict}</span></span>\s*'
                                    rf'<span class="tally">{expected}</span>')
             self.assertIn(f'verdict={verdict}', page)
+        self.assertNotIn(f'state-{escapes.FAILS_ON_MAIN}">{escapes.FAILS_ON_MAIN}</span>', page)
 
     def test_a_category_previews_its_meaning_and_the_chosen_one_reads_it_out(self) -> None:
         """Six descriptions under six pills made the pane taller than the escapes beside it, so an
@@ -1760,7 +1762,8 @@ class TestEscapes(WebTest):
                             runs_after=58)
         page = self.page(f'/escapes?verdict={escapes.FAILS_ON_MAIN}')
         self.assertIn('<strong>7 of 58</strong>', page)
-        self.assertIn('main&#39;s failure, not this change&#39;s.', page)
+        self.assertIn('before it.', page)
+        self.assertNotIn('not this change', page)
 
     def test_the_detail_pane_narrows_to_the_chosen_queue(self) -> None:
         """The counts beside it are narrowed, so a list that was not would name a test the queue
@@ -2362,3 +2365,136 @@ class TestFormatting(WebTest):
 
     def test_a_missing_clock_is_empty_rather_than_a_second_sentinel(self) -> None:
         self.assertEqual(formatting.clock(None), '')
+
+
+class TestEscapesMergedBucket(EscapeRows):
+    """The escapes page with ESCAPED and FAILS_ON_MAIN shown as one bucket.
+
+    The fold is a decision about what this page shows: nothing below writes a verdict, and the stored
+    name is still what the listing's `verdict` filter selects by, which is what keeps either half
+    reachable on its own.
+    """
+
+    CATEGORY_TALLY = re.compile(r'state-(\w+)">\w+</span></span>\s*<span class="tally">(\d+)</span>')
+    SPLIT_LINE = re.compile(r'<span class="label">([^<]+)</span><span class="tally">(\d+)</span>')
+
+    def categories(self, page: str) -> dict:
+        """The left pane's category list, by pill name, so a test can read the tally move."""
+        return {name: int(count) for name, count in self.CATEGORY_TALLY.findall(page)}
+
+    def split_lines(self, page: str) -> dict:
+        return {label: int(count) for label, count in self.SPLIT_LINE.findall(page)}
+
+    def _both_halves(self) -> None:
+        """Three convictions on two tests, the way the real population looks: one clean-baseline
+        escape and two rows of the same already-failing test."""
+        self._escape(1, 'fast/clean.html', runs_after=100, failed_after=60)
+        self._escape(2, 'fast/poisoned.html', runs_after=100, failed_after=88,
+                     verdict=escapes.FAILS_ON_MAIN)
+        self._escape(3, 'fast/poisoned.html', runs_after=100, failed_after=90,
+                     verdict=escapes.FAILS_ON_MAIN)
+
+    def test_the_pane_lists_one_escape_bucket_and_no_fails_on_main_bucket(self) -> None:
+        self._both_halves()
+        listed = self.categories(self.page('/escapes'))
+        self.assertEqual(listed.get(escapes.ESCAPED), 3)
+        self.assertNotIn(escapes.FAILS_ON_MAIN, listed)
+        self.assertEqual(set(listed), set(escapes.CATEGORIES))
+
+    def test_the_headline_rate_is_taken_over_the_merged_bucket(self) -> None:
+        """The number this page leads with is redefined by the fold, so it has to move with it."""
+        self._both_halves()
+        self._escape(4, 'fast/contained.html', runs_after=100, failed_after=0,
+                     verdict=escapes.CONTAINED)
+        page = self.page('/escapes')
+        self.assertIn('<span class="value">75%</span>', page)
+        self.assertIn('3 of 4 convictions main answered', page)
+
+    def test_the_listing_shows_both_halves_under_the_one_category(self) -> None:
+        self._both_halves()
+        page = self.page('/escapes')
+        self.assertEqual(self.rows_rendered(page), 3)
+        self.assertIn('fast/clean.html', page)
+        self.assertIn('fast/poisoned.html', page)
+
+    def test_the_pane_says_how_many_distinct_tests_the_convictions_name(self) -> None:
+        """Three convictions on two tests: printing only the convictions invites reading them as
+        three separate regressions, which is what the old FAILS_ON_MAIN population made easy."""
+        self._both_halves()
+        page = self.page('/escapes')
+        self.assertEqual(self.categories(page)[escapes.ESCAPED], 3)
+        self.assertEqual(self.split_lines(page)['distinct tests'], 2)
+
+    def test_the_pane_splits_the_bucket_by_what_the_baseline_said(self) -> None:
+        self._both_halves()
+        lines = self.split_lines(self.page('/escapes'))
+        self.assertEqual(lines['was not failing it'], 1)
+        self.assertEqual(lines['was already failing it'], 2)
+        self.assertEqual(lines['was not failing it'] + lines['was already failing it'],
+                         self.categories(self.page('/escapes'))[escapes.ESCAPED])
+
+    def test_a_verdict_filter_still_reaches_either_half_from_the_page(self) -> None:
+        self._both_halves()
+        already = self.page(f'/escapes?{ESCAPE_FILTER}=verdict:eq:{escapes.FAILS_ON_MAIN}')
+        self.assertIn('fast/poisoned.html', already)
+        self.assertNotIn('fast/clean.html', already)
+        clean = self.page(f'/escapes?{ESCAPE_FILTER}=verdict:eq:{escapes.ESCAPED}')
+        self.assertIn('fast/clean.html', clean)
+        self.assertNotIn('fast/poisoned.html', clean)
+
+    def test_a_verdict_filter_is_named_rather_than_refused_and_is_clearable(self) -> None:
+        self._both_halves()
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=verdict:eq:{escapes.FAILS_ON_MAIN}')
+        self.assertIn(f'filtered by verdict:eq:{escapes.FAILS_ON_MAIN}', page)
+        self.assertNotIn('Ignored', page)
+
+    def test_a_link_naming_the_folded_verdict_opens_the_bucket_that_holds_it(self) -> None:
+        """A bookmark from before the fold must not silently land on the default with no sign that
+        the bucket it asked for is gone."""
+        self._both_halves()
+        page = self.page(f'/escapes?verdict={escapes.FAILS_ON_MAIN}')
+        selected = re.search(r'<a class="entry selected"[^>]*>\s*<span class="line">\s*'
+                             r'<span class="label"><span class="state state-(\w+)">', page)
+        self.assertIsNotNone(selected, 'no category entry is selected')
+        self.assertEqual(selected.group(1), escapes.ESCAPED)
+        self.assertEqual(self.rows_rendered(page), 3)
+
+    def test_both_halves_print_the_strength_the_table_orders_them_by(self) -> None:
+        """Inside one bucket a dash in a column the page sorts on is an order a reader cannot
+        account for, and the already-failing half is now the bulk of that bucket."""
+        self._both_halves()
+        page = self.page('/escapes')
+        self.assertEqual(len(re.findall(r'>([\d.]+)%<span class="evidence">', page)), 3)
+
+    def test_a_category_outside_the_bucket_still_renders_a_dash_and_names_its_order(self) -> None:
+        """The other half of commit 27a0ceb: where the strength column is dashes the sentence above
+        the table is what says what the arrow is marking."""
+        self._escape(1, 'fast/contained.html', runs_after=100, failed_after=0,
+                     verdict=escapes.CONTAINED)
+        page = self.page(f'/escapes?verdict={escapes.CONTAINED}&{ESCAPE_SORT}=strength:desc')
+        self.assertNotRegex(page, r'>[\d.]+%<span class="evidence">')
+        self.assertIn('Ordered by Escape strength (%), highest first.', page)
+
+    def test_no_split_is_shown_where_neither_half_reached_anything(self) -> None:
+        self._escape(1, 'fast/contained.html', runs_after=100, failed_after=0,
+                     verdict=escapes.CONTAINED)
+        self.assertNotIn('<div class="subcategories">', self.page('/escapes'))
+
+    def test_serving_the_merged_page_writes_no_verdict(self) -> None:
+        self._both_halves()
+        before = self.connection.execute(
+            'SELECT verdict, COUNT(*) AS rows FROM escape_verdicts GROUP BY verdict').fetchall()
+        self.assertEqual(self.client.get('/escapes').status_code, 200)
+        after = self.connection.execute(
+            'SELECT verdict, COUNT(*) AS rows FROM escape_verdicts GROUP BY verdict').fetchall()
+        self.assertEqual([(row['verdict'], row['rows']) for row in after],
+                         [(row['verdict'], row['rows']) for row in before])
+        self.assertEqual([(row['verdict'], row['rows']) for row in after],
+                         [(escapes.ESCAPED, 1), (escapes.FAILS_ON_MAIN, 2)])
+
+    def test_no_internal_control_in_the_merged_pane_opens_a_new_tab(self) -> None:
+        self._both_halves()
+        page = self.page('/escapes')
+        for anchor in re.findall(r'<a[^>]*>', page):
+            if 'href="/' in anchor:
+                self.assertNotIn('target="_blank"', anchor)

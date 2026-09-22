@@ -8,13 +8,10 @@ a conviction that was wrong shows up as main failing the test it excused.
 One convicted test in one build, whose pull request landed as a known commit on main, falls in one
 bucket:
 
-  ESCAPED          main never failed it before the landing and failed it unexpectedly after: the
-                   conviction excused a real regression. Two further things are read off the counts
-                   rather than stored beside them — whether the share of failing runs after the
-                   landing is what a strong escape needs or thinner than that, and whether main is
-                   still failing the test now
-  FAILS_ON_MAIN    main failed it before the landing too, at any rate, so the failure is not this
-                   change's and the conviction was corroborated
+  ESCAPED          main failed it unexpectedly after the landing and never failed it before: the
+                   conviction excused a real regression
+  FAILS_ON_MAIN    main failed it unexpectedly after the landing, and had failed it before too, at
+                   any rate at all
   CONTAINED        no unexpected failure on main after the landing
   NO_RUNS          nothing ran the test on main in the window after the landing
   NO_BASELINE      it failed after the landing, but nothing ran before it, so a regression cannot be
@@ -23,6 +20,25 @@ bucket:
                    different head, so what landed is not what this conviction was made on. A build
                    EWS started after the landing is not divergence: it cannot have superseded the
                    tree that was already on main
+
+ESCAPED and FAILS_ON_MAIN are one bucket on the page. They are stored apart, because the counts
+either side of the landing are the raw observation and nothing here rewrites those, but they answer
+the same question — main failed the test after the landing — and the baseline alone decided which of
+the two names a conviction got. That one-failure knife-edge sorted severity wrongly: a test main had
+failed once in a hundred runs before the landing and then failed 88 of 125 runs after it was called
+FAILS_ON_MAIN and went unread, while an escape resting on one failure in fifty runs was called
+ESCAPED and led the page. So `CATEGORIES` is what the page lists, its ESCAPED category is the union
+of the two stored names, and the baseline question is kept as a subcategory under it: of those
+convictions, main was not failing the test before the landing, or was already failing it. Either half
+is still reachable on its own through a `verdict` filter on the listing, which narrows by the stored
+name.
+
+Three further things are read off a bucket's stored counts rather than stored beside them — how many
+distinct tests its convictions name, whether the share of failing runs after the landing is what a
+strong escape needs or thinner than that, and whether main is still failing the test now. The
+distinct-test count is shown beside the conviction count because one landed regression makes a new
+conviction on every later pull request whose build trips the same test, so the convictions count more
+loudly than the regressions behind them do.
 
 Whether main is still failing an escaped test cannot be read from the window either side of the
 landing however wide it is, so the assess pass asks a second, fresh question over the last
@@ -66,6 +82,45 @@ TREE_DIVERGED = config.TREE_DIVERGED
 
 VERDICTS = config.ESCAPE_VERDICTS
 
+# The stored verdicts the page shows as one ESCAPED bucket: main failed the test after the landing,
+# whether or not it had failed it before. Both names stay stored, and both stay in the listing's
+# filter vocabulary, so the baseline is demoted from a category to a subcategory rather than lost —
+# and folding them is a decision about what the page shows, reversible by editing this tuple, not a
+# rewrite of anything the assess pass recorded.
+MERGED_ESCAPE_VERDICTS = (ESCAPED, FAILS_ON_MAIN)
+
+# The top-level buckets the page lists, in the order it lists them. FAILS_ON_MAIN is not one of them:
+# it is half of ESCAPED. Every stored verdict belongs to exactly one category, which is what lets a
+# category's count be a sum over `by_verdict` rather than a second query.
+CATEGORIES = (ESCAPED, CONTAINED, NO_RUNS, NO_BASELINE, TREE_DIVERGED)
+
+CATEGORY_VERDICTS = {
+    category: MERGED_ESCAPE_VERDICTS if category == ESCAPED else (category,)
+    for category in CATEGORIES
+}
+
+
+def category_verdicts(category: str) -> tuple:
+    """The stored verdicts one listed category shows.
+
+    A name that is not a category stands for itself, so a caller narrowing by a stored verdict this
+    page does not list gets that verdict rather than an empty set.
+    """
+    return CATEGORY_VERDICTS.get(category, (category,))
+
+
+def category_of(verdict: str) -> str:
+    """Which listed category a stored verdict is shown under.
+
+    A `verdict=FAILS_ON_MAIN` link from before the fold therefore opens the bucket that now holds it
+    rather than a bucket the pane no longer has.
+    """
+    for category, verdicts in CATEGORY_VERDICTS.items():
+        if verdict in verdicts:
+            return category
+    return verdict
+
+
 # How hard an escaped test failed after the landing. Derived from the stored counts on every read
 # rather than stored alongside them, so it can never contradict the numbers beside it.
 STRONG = 'strong'
@@ -79,19 +134,28 @@ RECOVERED = 'recovered'
 NOT_RUN_LATELY = 'not_run_lately'
 UNCHECKED = 'unchecked'
 
+# What the baseline said, and a partition of the merged escape bucket: the question that used to
+# split it into two categories, kept as a split under the one. Read from the stored verdict rather
+# than from `failed_before`, so the subcategory a conviction is counted in is the same thing the
+# listing's `verdict` filter selects it by and the two can never disagree.
+BASELINE_CLEAN = 'baseline_clean'
+BASELINE_FAILING = 'baseline_failing'
+
 # What answers nothing about the conviction, so it belongs in no rate. An escape on few failures is
 # not here: the question was answered, and only the evidence behind the answer is thin.
 UNDECIDED_VERDICTS = (NO_RUNS, NO_BASELINE, TREE_DIVERGED)
 
 VERDICT_DESCRIPTIONS = {
-    ESCAPED: f'Main had not failed this in the {config.ESCAPE_WINDOW_DAYS} days before the landing '
-            f'and did fail it in the {config.ESCAPE_WINDOW_DAYS} days after, so the conviction '
-            'excused something main was not failing before. At least '
-            f'{config.ESCAPE_FAILURE_PCT}% of those runs failing makes it a strong escape; below '
-            'that the escape rests on few failures.',
+    ESCAPED: f'Main failed this in the {config.ESCAPE_WINDOW_DAYS} days after the landing, so the '
+            'conviction excused a failure main went on to have. Whether main had also failed it '
+            'before the landing is the split under this bucket, not a bucket of its own: one '
+            'failure in a long clean baseline was enough to separate the two, and it separated '
+            'them by nothing a reader is looking for. At least '
+            f'{config.ESCAPE_FAILURE_PCT}% of the runs after the landing failing makes it a strong '
+            'escape; below that the escape rests on few failures.',
     FAILS_ON_MAIN: f'Main was already failing this in the {config.ESCAPE_WINDOW_DAYS} days before '
-                   'the change landed, so the failure is not this change\'s and the build was told '
-                   'the truth.',
+                   'the change landed, and failed it after the landing too. Stored apart from '
+                   'ESCAPED and shown with it: this is the already-failing half of that bucket.',
     CONTAINED: f'Main did not fail this in the {config.ESCAPE_WINDOW_DAYS} days after the landing.',
     NO_RUNS: f'No bot ran this on main in the {config.ESCAPE_WINDOW_DAYS} days after the change '
             'landed.',
@@ -269,11 +333,17 @@ class Conviction:
 
 @dataclass(frozen=True)
 class Subcategories:
-    """How a window's escapes split, twice over.
+    """How a window's escapes split, three times over, and how many tests they name.
 
-    Two partitions of the one number, not six buckets: what main is doing with the test now, and how
-    hard it failed after the landing. Counted here rather than in a template so both totals are the
-    escape count and a page cannot print a split that does not add up.
+    Three partitions of the one number, not eight buckets: what main is doing with the test now, how
+    hard it failed after the landing, and what main had done with it before. Counted here rather than
+    in a template so every total is the escape count and a page cannot print a split that does not
+    add up.
+
+    `distinct_tests` is not a partition and is not comparable to the others: it is how many test names
+    the same convictions name. One landed regression makes a fresh conviction on every later pull
+    request whose build trips the same test, so the conviction count runs well ahead of the number of
+    underlying regressions and a page that prints only the former invites reading it as the latter.
     """
 
     still_failing: int = 0
@@ -282,6 +352,9 @@ class Subcategories:
     unchecked: int = 0
     strong: int = 0
     rare: int = 0
+    baseline_clean: int = 0
+    baseline_failing: int = 0
+    distinct_tests: int = 0
 
     @property
     def total(self) -> int:
@@ -290,6 +363,10 @@ class Subcategories:
     @property
     def rate_total(self) -> int:
         return self.strong + self.rare
+
+    @property
+    def baseline_total(self) -> int:
+        return self.baseline_clean + self.baseline_failing
 
 
 @dataclass(frozen=True)
@@ -319,8 +396,22 @@ class Tally:
                    if verdict not in UNDECIDED_VERDICTS)
 
     @property
+    def by_category(self) -> dict:
+        """One count per listed category, so the pane's own buckets are what it tallies.
+
+        Summed from `by_verdict` rather than queried again, since every stored verdict belongs to
+        exactly one category: the ESCAPED category is ESCAPED plus FAILS_ON_MAIN, and the rest stand
+        alone. A category nothing reached is a zero here rather than a missing key, the way
+        `by_verdict` already keeps its own.
+        """
+        return {category: sum(self.by_verdict.get(verdict, 0)
+                              for verdict in category_verdicts(category))
+                for category in CATEGORIES}
+
+    @property
     def escaped(self) -> int:
-        return self.by_verdict.get(ESCAPED, 0)
+        """The merged escape bucket: every conviction main failed the test after, either baseline."""
+        return sum(self.by_verdict.get(verdict, 0) for verdict in MERGED_ESCAPE_VERDICTS)
 
     @property
     def escape_rate_pct(self) -> Optional[float]:
@@ -675,33 +766,61 @@ def tally(connection: sqlite3.Connection, since: int, until: int, suite: Optiona
     )
 
 
+def _verdict_scope(verdicts: object) -> tuple:
+    """`(fragment, parameters)` narrowing a query to one category's stored verdicts.
+
+    Takes a tuple of names or a single name, so a caller asking for one stored verdict does not have
+    to wrap it. The bind names are generated here and cannot collide with the ones `filters` binds for
+    a reader's own clauses, which are all prefixed `filter`.
+    """
+    names = (verdicts,) if isinstance(verdicts, str) else tuple(verdicts)
+    parameters = {f'verdict{index}': name for index, name in enumerate(names)}
+    placeholders = ', '.join(f':{bind}' for bind in parameters)
+    return f'outcome.verdict IN ({placeholders})', parameters
+
+
 def escape_subcategories(connection: sqlite3.Connection, since: int, until: int,
                          suite: Optional[str] = None,
                          builders: tuple = ()) -> Subcategories:
-    """How the window's escapes split by what main is doing now and by how hard they failed.
+    """How the window's escapes split by what main did before, how hard they failed, and what main is
+    doing now — and how many distinct tests they name.
+
+    Over the whole merged bucket, both stored verdicts, because a split counted over less than the
+    category it sits under would print three partitions of a number that is not the one above them.
 
     Counted in Python off the stored counts, through the same two functions the sentences use, so a
-    bucket on the page cannot disagree with the sentence a reader opens under it.
+    bucket on the page cannot disagree with the sentence a reader opens under it. The baseline split
+    reads the stored verdict instead, which is the observation itself rather than a second reading of
+    it.
     """
     conditions, parameters = _filters(suite, builders)
-    parameters.update({'since': since, 'until': until, 'verdict': ESCAPED})
+    scope, bound = _verdict_scope(MERGED_ESCAPE_VERDICTS)
+    parameters.update(bound)
+    parameters.update({'since': since, 'until': until})
     counted: Counter = Counter()
+    tests = set()
     for row in connection.execute(
-            f'''SELECT outcome.runs_after, outcome.failed_after, outcome.recent_runs,
-                       outcome.recent_failed, outcome.recent_checked_at
+            f'''SELECT outcome.test_name, outcome.verdict, outcome.runs_after,
+                       outcome.failed_after, outcome.recent_runs, outcome.recent_failed,
+                       outcome.recent_checked_at
                 FROM escape_verdicts AS outcome
                 JOIN build_verdicts AS build USING (build_id)
-                WHERE outcome.verdict = :verdict AND {WINDOW}{conditions}''',
+                WHERE {scope} AND {WINDOW}{conditions}''',
             parameters,
     ):
+        tests.add(row['test_name'])
         counted[currency_for_counts(row['recent_runs'], row['recent_failed'],
                                     row['recent_checked_at'])] += 1
+        counted[BASELINE_FAILING if row['verdict'] == FAILS_ON_MAIN else BASELINE_CLEAN] += 1
         rarity = rarity_for_counts(row['runs_after'], row['failed_after'])
         if rarity is not None:
             counted[rarity] += 1
     return Subcategories(still_failing=counted[STILL_FAILING], recovered=counted[RECOVERED],
                          not_run_lately=counted[NOT_RUN_LATELY], unchecked=counted[UNCHECKED],
-                         strong=counted[STRONG], rare=counted[RARE])
+                         strong=counted[STRONG], rare=counted[RARE],
+                         baseline_clean=counted[BASELINE_CLEAN],
+                         baseline_failing=counted[BASELINE_FAILING],
+                         distinct_tests=len(tests))
 
 
 @dataclass(frozen=True)
@@ -773,11 +892,16 @@ def _page_offset(total: int, limit: int, page: int) -> int:
     return min(page - 1, (total - 1) // limit) * limit
 
 
-def convictions(connection: sqlite3.Connection, since: int, until: int, verdict: str,
+def convictions(connection: sqlite3.Connection, since: int, until: int, verdicts: object,
                 suite: Optional[str] = None, builders: tuple = (),
                 limit: int = ESCAPES_LISTED, page: int = 1, conditions: tuple = (),
                 sort_keys: tuple = ()) -> 'ConvictionPage':
-    """One page of the individual convictions behind one verdict's count, in the order asked for.
+    """One page of the individual convictions behind one category's count, in the order asked for.
+
+    `verdicts` is a tuple of stored verdict names, or one name: the ESCAPED category lists two stored
+    verdicts and every other category lists one, and `category_verdicts` is what turns a category into
+    the tuple. A reader's own `verdict` clause still applies on top of it, which is how either half of
+    the merged bucket stays reachable on its own.
 
     `conditions` and `sort_keys` come from `filters`, which owns every column name, operator and
     expression a request can reach: nothing a reader typed is spelled into this SQL, only bound to it.
@@ -801,13 +925,15 @@ def convictions(connection: sqlite3.Connection, since: int, until: int, verdict:
         # first aggregate column on this table.
         raise ValueError('the escapes listing does not group, so it cannot answer a HAVING clause')
     parameters.update(bound)
-    parameters.update({'since': since, 'until': until, 'verdict': verdict})
+    scope, scope_parameters = _verdict_scope(verdicts)
+    parameters.update(scope_parameters)
+    parameters.update({'since': since, 'until': until})
     narrowing = f' AND {where}' if where else ''
     source = f'''FROM escape_verdicts AS outcome
                 JOIN build_verdicts AS build USING (build_id)
                 JOIN latest_flakiness_verdicts AS verdict
                   ON verdict.build_id = outcome.build_id AND verdict.test_name = outcome.test_name
-                WHERE outcome.verdict = :verdict AND {WINDOW}{scoping}{narrowing}'''
+                WHERE {scope} AND {WINDOW}{scoping}{narrowing}'''
     # Counted through the same WHERE as the rows, and without the row query's correlated subqueries,
     # so the two cannot disagree about the set this page was taken from.
     total = connection.execute(f'SELECT COUNT(*) {source}', parameters).fetchone()[0]
@@ -941,14 +1067,18 @@ def _escaped_sentence(conviction: Conviction) -> 'tuple[Part, ...]':
 def sentence(conviction: Conviction) -> 'tuple[Part, ...]':
     """Why this conviction reached the verdict it did, in the counts main was asked for."""
     if conviction.verdict == FAILS_ON_MAIN:
+        # The counts on both sides and no conclusion drawn from them. This row sits in the same
+        # bucket as an ESCAPED one now, and the old tail ("main's failure, not this change's") was
+        # the knife-edge reading the fold exists to stop making: one failure in a long clean baseline
+        # is not grounds for telling a reader whose failure it is.
         return (
             Part('Main failed it '),
             _emphasised(f'{conviction.failed_after} of {conviction.runs_after}'),
             Part(' runs '),
             _emphasised('after'),
-            Part(' the landing vs. '),
+            Part(' the landing, and '),
             _emphasised(f'{conviction.failed_before} of {conviction.runs_before}'),
-            Part(' before — main\'s failure, not this change\'s.'),
+            Part(' before it.'),
         )
     if conviction.verdict == CONTAINED:
         return (
