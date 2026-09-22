@@ -48,6 +48,63 @@ QUEUE_GROUP_NAMES = tuple(group.name for group in QUEUE_GROUPS) + (OTHER,)
 _GROUPS_BY_NAME = {group.name: group for group in QUEUE_GROUPS}
 
 
+@dataclass(frozen=True)
+class QueueFamily:
+    """One family above the groups: the platform lineage its groups share, which is what a reader who
+    wants "every Apple queue" is asking for and could previously only get by ticking three groups.
+
+    `groups` names groups rather than builders, so a family is a statement about the registry above it
+    and a new builder needs no change here: it joins the group its pattern claims, and that group's
+    family already holds it.
+    """
+
+    name: str
+    groups: tuple
+
+
+# Windows is its own family rather than a member of one: it is neither Apple nor Linux, and leaving it
+# at the top level beside the two would have made the level a partial cover rather than a partition.
+# `OTHER` gets the same treatment for the same reason -- every group sits under exactly one family, so
+# no group is reachable twice and none is orphaned. A family holding a single group of its own name is
+# rendered as one row (see `FamilyNode.sole_group`), since a `Windows` row whose only child is a
+# `Windows` row says nothing the parent did not.
+QUEUE_FAMILIES = (
+    QueueFamily('Apple', ('macOS', 'iOS', 'visionOS')),
+    QueueFamily('Linux', ('GTK', 'WPE')),
+    QueueFamily('Windows', ('Windows',)),
+    QueueFamily('Other', (OTHER,)),
+)
+
+QUEUE_FAMILY_NAMES = tuple(family.name for family in QUEUE_FAMILIES)
+
+
+def _family_of_group(families: Iterable[QueueFamily]) -> dict:
+    """Which family each group sits under, refusing anything that is not a partition of the groups:
+    a group named by two families, a group no family names, and a family naming a group that does not
+    exist all raise here rather than at the one page that would have rendered wrong. Called on
+    `QUEUE_FAMILIES` at import, so the registry cannot be edited into a cover with a hole in it."""
+    index: dict = {}
+    for family in families:
+        for group in family.groups:
+            if group in index:
+                raise AssertionError(f'{group} sits under both {index[group]} and {family.name}')
+            index[group] = family.name
+    named, known = set(index), set(QUEUE_GROUP_NAMES)
+    if named - known:
+        raise AssertionError(f'no such queue group: {sorted(named - known)}')
+    if known - named:
+        raise AssertionError(f'no family holds {sorted(known - named)}')
+    return index
+
+
+_FAMILY_OF_GROUP = _family_of_group(QUEUE_FAMILIES)
+
+
+def family_of(group: str) -> Optional[str]:
+    """The family a group sits under, or None where the name is not a group at all."""
+    return _FAMILY_OF_GROUP.get(group)
+
+
 def group_of(builder: str) -> str:
     """The group a builder belongs to: the name of the first group whose pattern claims it, or
     `OTHER` where none does. Never unreachable, which is the point of classifying by pattern."""
@@ -76,10 +133,12 @@ class BuilderLeaf:
 @dataclass(frozen=True)
 class VersionNode:
     """One version bucket under a group in the dropdown tree. `version` is None for the leftover
-    bucket of a group's unversioned queues, rendered as "unversioned"."""
+    bucket of a group's unversioned queues, rendered as "unversioned". `convictions` is the total over
+    its own builders."""
 
     version: Optional[str]
     builders: tuple
+    convictions: int = 0
 
 
 @dataclass(frozen=True)
@@ -89,17 +148,47 @@ class GroupNode:
     `versions` is empty where a version level would not divide the group -- every one of its builders
     fell in the same bucket, versioned or not -- and `builders` then holds the group's own builders
     directly. Where `versions` is non-empty, `builders` is empty and every builder is under one of
-    them instead.
+    them instead. `convictions` is the total over whichever of the two holds them.
     """
 
     name: str
     versions: tuple
     builders: tuple
+    convictions: int = 0
 
 
-def tree(builders: Iterable[str], counts: Mapping[str, int]) -> tuple:
-    """The render-ready group/version/builder tree for exactly the builders given, so a queue absent
-    from the caller's window is never offered and a new queue needs no code change here."""
+@dataclass(frozen=True)
+class FamilyNode:
+    """One family in the dropdown tree, holding only the groups the caller's own builders reached.
+
+    `convictions` is the total over those groups, which is the same leaf total summed one level
+    higher: every count in this tree folds up from `BuilderLeaf.convictions` and none is counted a
+    second way.
+    """
+
+    name: str
+    groups: tuple
+    convictions: int = 0
+
+    @property
+    def sole_group(self) -> 'Optional[GroupNode]':
+        """The single group this family renders as, where it holds one group of its own name --
+        `Windows` under `Windows`, `other` under `Other` -- so the picker draws one row instead of a
+        row whose only child repeats it. None for a family that genuinely divides."""
+        if len(self.groups) == 1 and self.groups[0].name.lower() == self.name.lower():
+            return self.groups[0]
+        return None
+
+
+def _total(leaves: Iterable[BuilderLeaf]) -> int:
+    """The convictions a set of builder leaves holds between them. The one definition of a count above
+    the leaf level: a version sums its builders, a group sums its versions' sums, and a family sums
+    its groups' -- so a parent's count cannot disagree with what is under it."""
+    return sum(leaf.convictions for leaf in leaves)
+
+
+def _group_nodes(builders: Iterable[str], counts: Mapping[str, int]) -> tuple:
+    """The group/version/builder levels for exactly the builders given, in registry order."""
     by_group: dict = {}
     for builder in builders:
         by_group.setdefault(group_of(builder), []).append(builder)
@@ -112,38 +201,54 @@ def tree(builders: Iterable[str], counts: Mapping[str, int]) -> tuple:
         by_version: dict = {}
         for builder in members:
             by_version.setdefault(version_of(builder), []).append(builder)
+        leaves = {
+            version: tuple(BuilderLeaf(builder, counts.get(builder, 0))
+                           for builder in sorted(bucket))
+            for version, bucket in by_version.items()
+        }
         if len(by_version) > 1:
             versions = tuple(
-                VersionNode(
-                    version=version,
-                    builders=tuple(BuilderLeaf(builder, counts.get(builder, 0))
-                                   for builder in sorted(bucket)),
-                )
-                for version, bucket in sorted(by_version.items(),
-                                              key=lambda item: (item[0] is None, item[0]))
+                VersionNode(version=version, builders=leaves[version],
+                            convictions=_total(leaves[version]))
+                for version in sorted(by_version, key=lambda value: (value is None, value))
             )
-            nodes.append(GroupNode(name=name, versions=versions, builders=()))
+            nodes.append(GroupNode(name=name, versions=versions, builders=(),
+                                   convictions=sum(node.convictions for node in versions)))
         else:
-            nodes.append(GroupNode(
-                name=name, versions=(),
-                builders=tuple(BuilderLeaf(builder, counts.get(builder, 0)) for builder in members),
-            ))
+            own = tuple(BuilderLeaf(builder, counts.get(builder, 0)) for builder in members)
+            nodes.append(GroupNode(name=name, versions=(), builders=own, convictions=_total(own)))
     return tuple(nodes)
+
+
+def tree(builders: Iterable[str], counts: Mapping[str, int]) -> tuple:
+    """The render-ready family/group/version/builder tree for exactly the builders given, so a queue
+    absent from the caller's window is never offered and a new queue needs no code change here. A
+    family holding none of those builders is left out, the way an empty group already is."""
+    groups = {node.name: node for node in _group_nodes(builders, counts)}
+    families = []
+    for family in QUEUE_FAMILIES:
+        held = tuple(groups[name] for name in family.groups if name in groups)
+        if not held:
+            continue
+        families.append(FamilyNode(name=family.name, groups=held,
+                                   convictions=sum(node.convictions for node in held)))
+    return tuple(families)
 
 
 @dataclass(frozen=True)
 class Selection:
-    """A reader's choice of queues: any combination of whole groups, group-qualified versions and
-    individual builders, unioned. Every field here is already validated -- dropping an unknown value
-    is the caller's job -- so `resolve` never has to guess at one."""
+    """A reader's choice of queues: any combination of whole families, whole groups, group-qualified
+    versions and individual builders, unioned. Every field here is already validated -- dropping an
+    unknown value is the caller's job -- so `resolve` never has to guess at one."""
 
     groups: tuple = ()
     versions: tuple = ()  # (group, version) pairs
     builders: tuple = ()
+    families: tuple = ()
 
     @property
     def empty(self) -> bool:
-        return not (self.groups or self.versions or self.builders)
+        return not (self.families or self.groups or self.versions or self.builders)
 
 
 def resolve(selection: Selection, known_builders: Iterable[str]) -> tuple:
@@ -153,7 +258,7 @@ def resolve(selection: Selection, known_builders: Iterable[str]) -> tuple:
 
     Resolved here rather than re-derived as SQL is what keeps the classification to one
     implementation: the tree a reader clicked and the WHERE clause a query runs both come from the
-    same `group_of`/`version_of` calls, so they cannot disagree.
+    same `family_of`/`group_of`/`version_of` calls, so they cannot disagree.
     """
     if selection.empty:
         return ()
@@ -161,6 +266,9 @@ def resolve(selection: Selection, known_builders: Iterable[str]) -> tuple:
     matched = set(selection.builders) & set(known)
     for builder in known:
         group = group_of(builder)
+        if family_of(group) in selection.families:
+            matched.add(builder)
+            continue
         if group in selection.groups:
             matched.add(builder)
             continue

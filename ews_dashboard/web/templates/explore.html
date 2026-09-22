@@ -1,5 +1,5 @@
 {% extends 'base.html' %}
-{% from 'parts.html' import window_chooser, suite_chooser, queue_dropdown, staleness, rate %}
+{% from 'parts.html' import window_chooser, suite_chooser, queue_dropdown, staleness, rate, ignored_queues %}
 
 {% block title %}EWS flake detection — explore{% endblock %}
 
@@ -12,7 +12,7 @@
    spell itself out again as {{ any_state }}, since an empty list here reads as the default rather
    than as a reader's own choice. #}
 {% set held_state = () if build_filter.defaulted else (build_filter.states or (any_state,)) %}
-{% set filter_args = {'state': held_state, 'min_shown': build_filter.min_shown, 'max_shown': build_filter.max_shown, 'build': selected_build, 'test': test_filter, 'group': group, 'version': version, 'builder': builder} %}
+{% set filter_args = {'state': held_state, 'min_shown': build_filter.min_shown, 'max_shown': build_filter.max_shown, 'build': selected_build, 'test': test_filter, 'family': family, 'group': group, 'version': version, 'builder': builder} %}
 {% set held_args = filter_args %}
 {# Every form on this page carries the state it is not editing, since a GET form sends its own fields
    and nothing else: a filter submitted from the builds pane would otherwise clear the detail pane's. #}
@@ -20,6 +20,7 @@
 <input type="hidden" name="days" value="{{ window.days }}">
 {%- if suite %}<input type="hidden" name="suite" value="{{ suite }}">{% endif %}
 {%- if include_queue %}
+{%- for chosen in family %}<input type="hidden" name="family" value="{{ chosen }}">{% endfor %}
 {%- for chosen in group %}<input type="hidden" name="group" value="{{ chosen }}">{% endfor %}
 {%- for chosen in version %}<input type="hidden" name="version" value="{{ chosen }}">{% endfor %}
 {%- for chosen in builder %}<input type="hidden" name="builder" value="{{ chosen }}">{% endfor %}
@@ -39,6 +40,7 @@
 {%- if test_filter %}<input type="hidden" name="test" value="{{ test_filter }}">{% endif %}
 {%- endmacro %}
 {{ staleness(freshness, freshness_dismissed) }}
+{{ ignored_queues(queue_ignored) }}
 
 <div class="row headline">
   <div class="col-4">
@@ -47,7 +49,7 @@
   </div>
   <div class="col-8">
     <div class="chooser groups">
-      {{ queue_dropdown('explore', queue_tree, group, version, builder, queue_summary, queue_held_fields(include_queue=False)) }}
+      {{ queue_dropdown('explore', queue_tree, group, version, builder, queue_summary, queue_held_fields(include_queue=False), selected_families=family) }}
       {{ suite_chooser('explore', window, suite_choices, suite, filter_args=filter_args) }}
       {{ window_chooser('explore', window, window_choices, suite=suite, filter_args=filter_args) }}
     </div>

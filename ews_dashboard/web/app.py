@@ -327,26 +327,52 @@ def _bound(name: str) -> Optional[int]:
         return None
 
 
-def _selection(known_builders: tuple) -> queues.Selection:
-    """The reader's queue selection, read from `group`, `version` and `builder`, each repeatable and
-    unioned. `version` is `group:version`, group-qualified so a bare version number is never taken
-    from the wrong group's vocabulary — `version=iOS:26` must not also select
-    `visionOS-26-Simulator-WK2-Tests-EWS`. An unknown group, a `version` that does not split into
-    exactly two non-empty parts, and a builder not in this window's own set are all dropped rather
-    than refused, matching every other filter here.
+@dataclass(frozen=True)
+class QueueChoice:
+    """What a request asked of the queue picker: the selection it resolved to, and the vocabulary
+    values this page could not read, kept so the page can name them instead of narrowing silently."""
+
+    selection: queues.Selection
+    ignored: tuple
+
+
+def _selection(known_builders: tuple) -> QueueChoice:
+    """The reader's queue selection, read from `family`, `group`, `version` and `builder`, each
+    repeatable and unioned. `version` is `group:version`, group-qualified so a bare version number is
+    never taken from the wrong group's vocabulary — `version=iOS:26` must not also select
+    `visionOS-26-Simulator-WK2-Tests-EWS`. An unknown family, an unknown group, a `version` that does
+    not split into exactly two non-empty parts, and a builder not in this window's own set are all
+    dropped rather than refused, matching every other filter here.
+
+    A dropped family, group or version is also named back to the reader, the way an unreadable filter
+    clause already is: those three come from a fixed vocabulary, so a value outside it is a URL this
+    page cannot honour and silence would read as a filter that matched everything. A builder is not
+    named, because a builder absent from this window is a perfectly good queue name asked over the
+    wrong days, and it comes back by widening the window.
     """
-    groups = tuple(name for name in request.args.getlist('group')
-                   if name in queues.QUEUE_GROUP_NAMES)
-    versions = []
+    families, groups, versions, ignored = [], [], [], []
+    for name in request.args.getlist('family'):
+        if name in queues.QUEUE_FAMILY_NAMES:
+            families.append(name)
+        else:
+            ignored.append(f'family={name}')
+    for name in request.args.getlist('group'):
+        if name in queues.QUEUE_GROUP_NAMES:
+            groups.append(name)
+        else:
+            ignored.append(f'group={name}')
     for raw in request.args.getlist('version'):
         parts = raw.split(':', 1)
-        if len(parts) != 2:
-            continue
-        group, version = parts
-        if group in queues.QUEUE_GROUP_NAMES and version:
-            versions.append((group, version))
+        if len(parts) == 2 and parts[0] in queues.QUEUE_GROUP_NAMES and parts[1]:
+            versions.append((parts[0], parts[1]))
+        else:
+            ignored.append(f'version={raw}')
     builders = tuple(name for name in request.args.getlist('builder') if name in known_builders)
-    return queues.Selection(groups=groups, versions=tuple(versions), builders=builders)
+    return QueueChoice(
+        selection=queues.Selection(families=tuple(families), groups=tuple(groups),
+                                   versions=tuple(versions), builders=builders),
+        ignored=tuple(ignored),
+    )
 
 
 def _queue_summary(selection: queues.Selection, resolved: tuple) -> str:
@@ -466,13 +492,15 @@ class Scope:
     activity: list
     tree: tuple
     summary: str
+    ignored: tuple
 
 
 def _scope(open_connection: sqlite3.Connection, window: Window) -> Scope:
     suite = _chosen('suite', SUITE_CHOICES)
     activity = convictions.queue_activity(open_connection, window.since, window.until, suite=suite)
     known = tuple(queue.builder for queue in activity)
-    selection = _selection(known)
+    choice = _selection(known)
+    selection = choice.selection
     resolved = queues.resolve(selection, known)
     counts = {queue.builder: queue.convictions for queue in activity}
     return Scope(
@@ -482,13 +510,15 @@ def _scope(open_connection: sqlite3.Connection, window: Window) -> Scope:
         activity=activity,
         tree=queues.tree(known, counts),
         summary=_queue_summary(selection, resolved),
+        ignored=choice.ignored,
     )
 
 
 def _selection_args(selection: queues.Selection) -> dict:
-    """`group`/`version`/`builder` as the tuples a template forwards through a link or a hidden
-    field, in the URL grammar `_selection` reads back."""
+    """`family`/`group`/`version`/`builder` as the tuples a template forwards through a link or a
+    hidden field, in the URL grammar `_selection` reads back."""
     return {
+        'family': selection.families,
         'group': selection.groups,
         'version': tuple(f'{group}:{version}' for group, version in selection.versions),
         'builder': selection.builders,
@@ -509,6 +539,7 @@ def _landing_context(open_connection: sqlite3.Connection, window: Window) -> dic
         **_selection_args(scope.selection),
         queue_tree=scope.tree,
         queue_summary=scope.summary,
+        queue_ignored=scope.ignored,
         rolling=rolling,
         rolling_choices=ROLLING_CHOICES,
         counts=false_positive.rate(open_connection, classifier, window.since, window.until,
@@ -547,6 +578,7 @@ def _explore_context(open_connection: sqlite3.Connection, window: Window) -> dic
         **_selection_args(scope.selection),
         queue_tree=scope.tree,
         queue_summary=scope.summary,
+        queue_ignored=scope.ignored,
         builds=builds,
         builds_total=false_positive.failing_build_count(
             open_connection, window.since, window.until, suite=suite, builders=builders,
@@ -591,6 +623,7 @@ def _tests_context(open_connection: sqlite3.Connection, window: Window) -> dict:
         **_selection_args(scope.selection),
         queue_tree=scope.tree,
         queue_summary=scope.summary,
+        queue_ignored=scope.ignored,
         convicted=convicted,
         rule_descriptions=config.RULE_DESCRIPTIONS,
         flake_types=config.FLAKINESS_RULES,
@@ -723,6 +756,7 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
         **_selection_args(scope.selection),
         queue_tree=scope.tree,
         queue_summary=scope.summary,
+        queue_ignored=scope.ignored,
         tally=counted,
         category_counts=counted.by_category,
         escaped_verdict=escapes.ESCAPED,

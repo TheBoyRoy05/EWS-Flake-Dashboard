@@ -1,5 +1,5 @@
 {% extends 'base.html' %}
-{% from 'parts.html' import window_chooser, suite_chooser, queue_dropdown, staleness %}
+{% from 'parts.html' import window_chooser, suite_chooser, queue_dropdown, staleness, ignored_queues %}
 
 {% block title %}EWS flake detection — escapes{% endblock %}
 
@@ -9,7 +9,7 @@
    not parse, which is not part of what the page is showing, and not `page`: a reader who changes the
    window, the scope or the category is looking at a different set, and carrying page 3 into it would
    answer with the end of a set they have not seen the start of. #}
-{% set filter_args = {filter_argument: asked.filter_clauses, sort_argument: asked.sort_clauses, 'verdict': verdict_shown, 'group': group, 'version': version, 'builder': builder} %}
+{% set filter_args = {filter_argument: asked.filter_clauses, sort_argument: asked.sort_clauses, 'verdict': verdict_shown, 'family': family, 'group': group, 'version': version, 'builder': builder} %}
 {# Every form on this page carries the window, category and scope it is not editing, since a GET form
    sends its own fields and nothing else. `page` is deliberately absent for the reason above. #}
 {% macro held_fields(include_queue=True) %}
@@ -19,6 +19,7 @@
 {%- for clause in asked.filter_clauses %}<input type="hidden" name="{{ filter_argument }}" value="{{ clause }}">{% endfor %}
 {%- for clause in asked.sort_clauses %}<input type="hidden" name="{{ sort_argument }}" value="{{ clause }}">{% endfor %}
 {%- if include_queue %}
+{%- for chosen in family %}<input type="hidden" name="family" value="{{ chosen }}">{% endfor %}
 {%- for chosen in group %}<input type="hidden" name="group" value="{{ chosen }}">{% endfor %}
 {%- for chosen in version %}<input type="hidden" name="version" value="{{ chosen }}">{% endfor %}
 {%- for chosen in builder %}<input type="hidden" name="builder" value="{{ chosen }}">{% endfor %}
@@ -55,6 +56,7 @@
 {% if asked.rejected %}
 <p class="note">Ignored {{ asked.rejected | length }} filter{{ '' if asked.rejected | length == 1 else 's' }} this page cannot read: {{ asked.rejected | join(', ') }}. Everything below is filtered by the rest.</p>
 {% endif %}
+{{ ignored_queues(queue_ignored) }}
 
 <div class="row headline">
   <div class="col-4">
@@ -63,7 +65,7 @@
   </div>
   <div class="col-8">
     <div class="chooser groups">
-      {{ queue_dropdown('escaped_regressions', queue_tree, group, version, builder, queue_summary, held_fields(include_queue=False)) }}
+      {{ queue_dropdown('escaped_regressions', queue_tree, group, version, builder, queue_summary, held_fields(include_queue=False), selected_families=family) }}
       {{ suite_chooser('escaped_regressions', window, suite_choices, suite, filter_args=filter_args) }}
       {{ window_chooser('escaped_regressions', window, window_choices, suite=suite, filter_args=filter_args) }}
     </div>

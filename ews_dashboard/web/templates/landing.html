@@ -1,14 +1,15 @@
 {% extends 'base.html' %}
-{% from 'parts.html' import window_chooser, suite_chooser, queue_dropdown, rolling_chooser, staleness, rate %}
+{% from 'parts.html' import window_chooser, suite_chooser, queue_dropdown, rolling_chooser, staleness, rate, ignored_queues %}
 
 {% block content %}
-{% set filter_args = {'group': group, 'version': version, 'builder': builder} %}
+{% set filter_args = {'family': family, 'group': group, 'version': version, 'builder': builder} %}
 {% macro held_fields() %}
 <input type="hidden" name="days" value="{{ window.days }}">
 {%- if suite %}<input type="hidden" name="suite" value="{{ suite }}">{% endif %}
 {%- if rolling %}<input type="hidden" name="rolling" value="{{ rolling }}">{% endif %}
 {%- endmacro %}
 {{ staleness(freshness, freshness_dismissed) }}
+{{ ignored_queues(queue_ignored) }}
 
 <div class="row headline">
   <div class="col-4">
@@ -17,7 +18,7 @@
   </div>
   <div class="col-8">
     <div class="chooser groups">
-      {{ queue_dropdown('landing', queue_tree, group, version, builder, queue_summary, held_fields()) }}
+      {{ queue_dropdown('landing', queue_tree, group, version, builder, queue_summary, held_fields(), selected_families=family) }}
       {{ suite_chooser('landing', window, suite_choices, suite, rolling=rolling, filter_args=filter_args) }}
       {{ window_chooser('landing', window, window_choices, suite=suite, rolling=rolling, filter_args=filter_args) }}
     </div>

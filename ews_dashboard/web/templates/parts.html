@@ -20,71 +20,130 @@
 {# The queue picker is a details dropdown carrying its own GET form, the way the tests-table chip
    filter is: every control here works without JavaScript and stays answerable by the server: this
    page also ships `dashboard.js`, which only removes round trips it does not require. `tree` groups
-   the window's own builders three levels deep — group, then version where a version actually splits
-   the group, then builder — so a queue absent from the window is never offered. Every checkbox here
-   is independently submittable without JavaScript: ticking a group's own box selects `group=<name>`,
-   a version's box selects `version=<group>:<version>`, and a builder's box selects `builder=<name>`,
-   unioned on the server. With JavaScript, ticking a group or version also ticks every box beneath it
-   on screen, but the browser narrows what gets submitted rather than widening it: at submit time it
-   disables the descendants a ticked parent's own value already covers, so the query string that
-   leaves stays `group=<name>` — not every builder that group happens to contain today — and a queue
-   added to that group later is still covered. Unticking any single box also unticks every parent
-   above it without touching its other children, so a reader who backs one builder out of a ticked
-   group is left with the rest still individually selected. `held` carries the hidden fields for every
-   other field this page is not editing, exactly as the page's own `held_fields()` built them. #}
-{% macro queue_dropdown(endpoint, tree, selected_groups, selected_versions, selected_builders, summary, held) %}
-{%- set active = selected_groups or selected_versions or selected_builders %}
+   the window's own builders four levels deep — family, then group, then version where a version
+   actually splits the group, then builder — so a queue absent from the window is never offered. Every
+   checkbox here is independently submittable without JavaScript: ticking a family's own box selects
+   `family=<name>`, a group's selects `group=<name>`, a version's selects `version=<group>:<version>`,
+   and a builder's selects `builder=<name>`, unioned on the server. With JavaScript, ticking a parent
+   also ticks every box beneath it on screen, but the browser narrows what gets submitted rather than
+   widening it: at submit time it disables the descendants a ticked parent's own value already covers,
+   so the query string that leaves stays `family=Apple` or `group=macOS` — not every builder that
+   family or group happens to contain today — and a queue added later is still covered. Unticking any
+   single box also unticks every parent above it without touching its other children, so a reader who
+   backs one builder out of a ticked group is left with the rest still individually selected. `held`
+   carries the hidden fields for every other field this page is not editing, exactly as the page's own
+   `held_fields()` built them.
+
+   A count beside a family, group or version is the sum of the builder convictions underneath it,
+   folded up from the same leaf numbers rather than counted a second way (`queues._total`).
+
+   A selected parent renders its descendants CHECKED and `implied`, at every level: `family=Linux`
+   renders GTK and WPE and their builders ticked, exactly as ticking Linux in the browser does. Before
+   that, the server rendered only the parent named in the query, so the page a reader landed on after
+   Apply showed Linux ticked over blank children and read as a selection that had lost its contents.
+   Those inherited boxes are also rendered `disabled`, which is what keeps them out of the submission
+   with the script blocked: a disabled input is not submitted, so Apply still sends `family=Linux` and
+   never grows into an enumeration of today's builders. `dashboard.js` re-enables them on load and
+   disables them again at submit, doing the same job a click at a time — so it changes nothing about
+   what leaves the browser, and unticking one descendant stays possible where the script runs. A
+   descendant the query named itself is NOT implied and NOT disabled: it is a value this reader asked
+   for by name, and it keeps submitting itself. #}
+{% macro queue_leaves(leaves, selected_builders, inherited=False) %}
+<ul>
+  {% for leaf in leaves %}
+  {%- set implied = inherited and leaf.builder not in selected_builders %}
+  <li class="node leaf-node"><label class="{{ 'implied' if implied }}" title="{{ leaf.convictions }} convictions"><input type="checkbox" name="builder" value="{{ leaf.builder }}"{{ ' checked' if inherited or leaf.builder in selected_builders }}{{ ' disabled' if implied }}> {{ leaf.builder }}</label></li>
+  {% endfor %}
+</ul>
+{%- endmacro %}
+
+{% macro queue_children(group, selected_versions, selected_builders, inherited=False) %}
+{%- if group.versions %}
+<ul>
+  {% for version in group.versions %}
+  {%- set version_value = group.name ~ ':' ~ version.version %}
+  {%- set version_explicit = version_value in selected_versions %}
+  {%- set version_open = namespace(value=version_explicit) %}
+  {%- for leaf in version.builders %}
+  {%- if leaf.builder in selected_builders %}{% set version_open.value = True %}{% endif %}
+  {%- endfor %}
+  <li class="node version-node">
+    <div class="row{{ ' implied' if inherited and not version_explicit }}">
+      <input type="checkbox" name="version" value="{{ version_value }}" aria-label="Select {{ version.version or 'unversioned' }}"{{ ' checked' if version_explicit or inherited }}{{ ' disabled' if inherited and not version_explicit }}>
+      <details class="tree-node"{{ ' open' if version_open.value }}>
+        <summary>{{ version.version or 'unversioned' }} <span class="tally">{{ version.convictions | count }}</span></summary>
+        {{ queue_leaves(version.builders, selected_builders, inherited=version_explicit or inherited) }}
+      </details>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{%- else %}
+{{ queue_leaves(group.builders, selected_builders, inherited=inherited) }}
+{%- endif %}
+{%- endmacro %}
+
+{% macro queue_dropdown(endpoint, tree, selected_groups, selected_versions, selected_builders, summary, held, selected_families=()) %}
+{%- set active = selected_families or selected_groups or selected_versions or selected_builders %}
 <details class="table-filter queue-tree"{{ ' open' if active }}>
   <summary class="{{ 'active' if active }}" aria-label="Filter by queue">{{ summary }}</summary>
   <form class="filter-form" method="get" action="{{ url_for(endpoint) }}">
     {{ held }}
     <ul class="tree">
-      {% for group in tree %}
-      {%- set group_open = namespace(value=group.name in selected_groups) %}
+      {% for family in tree %}
+      {#- A family holding one group of its own name renders as a single row: a `Windows` row whose
+          only child is a `Windows` row says nothing the parent did not. Its box carries the family
+          value, and reads as checked for `group=Windows` too, so a link written before this level
+          existed still shows the reader what it selected. #}
+      {%- set sole = family.sole_group %}
+      {%- set family_checked = family.name in selected_families or (sole and sole.name in selected_groups) %}
+      {%- set family_open = namespace(value=family_checked) %}
+      {%- for group in family.groups %}
+      {%- if group.name in selected_groups %}{% set family_open.value = True %}{% endif %}
       {%- for version in group.versions %}
-      {%- if group.name ~ ':' ~ version.version in selected_versions %}{% set group_open.value = True %}{% endif %}
+      {%- if group.name ~ ':' ~ version.version in selected_versions %}{% set family_open.value = True %}{% endif %}
       {%- for leaf in version.builders %}
-      {%- if leaf.builder in selected_builders %}{% set group_open.value = True %}{% endif %}
+      {%- if leaf.builder in selected_builders %}{% set family_open.value = True %}{% endif %}
       {%- endfor %}
       {%- endfor %}
       {%- for leaf in group.builders %}
-      {%- if leaf.builder in selected_builders %}{% set group_open.value = True %}{% endif %}
+      {%- if leaf.builder in selected_builders %}{% set family_open.value = True %}{% endif %}
       {%- endfor %}
-      <li class="node group-node">
+      {%- endfor %}
+      <li class="node family-node">
         <div class="row">
-          <input type="checkbox" name="group" value="{{ group.name }}" aria-label="Select {{ group.name }}"{{ ' checked' if group.name in selected_groups }}>
-          <details class="tree-node"{{ ' open' if group_open.value }}>
-            <summary>{{ group.name }}</summary>
-            {% if group.versions %}
+          <input type="checkbox" name="family" value="{{ family.name }}" aria-label="Select {{ family.name }}"{{ ' checked' if family_checked }}>
+          <details class="tree-node"{{ ' open' if family_open.value }}>
+            <summary>{{ family.name }} <span class="tally">{{ family.convictions | count }}</span></summary>
+            {%- if sole %}
+            {{ queue_children(sole, selected_versions, selected_builders, inherited=family_checked) }}
+            {%- else %}
             <ul>
-              {% for version in group.versions %}
-              {%- set version_value = group.name ~ ':' ~ version.version %}
-              {%- set version_open = namespace(value=version_value in selected_versions) %}
+              {% for group in family.groups %}
+              {%- set group_explicit = group.name in selected_groups %}
+              {%- set group_implied = family_checked and not group_explicit %}
+              {%- set group_open = namespace(value=group_explicit) %}
+              {%- for version in group.versions %}
+              {%- if group.name ~ ':' ~ version.version in selected_versions %}{% set group_open.value = True %}{% endif %}
               {%- for leaf in version.builders %}
-              {%- if leaf.builder in selected_builders %}{% set version_open.value = True %}{% endif %}
+              {%- if leaf.builder in selected_builders %}{% set group_open.value = True %}{% endif %}
               {%- endfor %}
-              <li class="node version-node">
-                <div class="row">
-                  <input type="checkbox" name="version" value="{{ version_value }}" aria-label="Select {{ version.version or 'unversioned' }}"{{ ' checked' if version_value in selected_versions }}>
-                  <details class="tree-node"{{ ' open' if version_open.value }}>
-                    <summary>{{ version.version or 'unversioned' }}</summary>
-                    <ul>
-                      {% for leaf in version.builders %}
-                      <li class="node leaf-node"><label title="{{ leaf.convictions }} convictions"><input type="checkbox" name="builder" value="{{ leaf.builder }}"{{ ' checked' if leaf.builder in selected_builders }}> {{ leaf.builder }}</label></li>
-                      {% endfor %}
-                    </ul>
+              {%- endfor %}
+              {%- for leaf in group.builders %}
+              {%- if leaf.builder in selected_builders %}{% set group_open.value = True %}{% endif %}
+              {%- endfor %}
+              <li class="node group-node">
+                <div class="row{{ ' implied' if group_implied }}">
+                  <input type="checkbox" name="group" value="{{ group.name }}" aria-label="Select {{ group.name }}"{{ ' checked' if group_explicit or family_checked }}{{ ' disabled' if group_implied }}>
+                  <details class="tree-node"{{ ' open' if group_open.value }}>
+                    <summary>{{ group.name }} <span class="tally">{{ group.convictions | count }}</span></summary>
+                    {{ queue_children(group, selected_versions, selected_builders, inherited=group_explicit or family_checked) }}
                   </details>
                 </div>
               </li>
               {% endfor %}
             </ul>
-            {% else %}
-            <ul>
-              {% for leaf in group.builders %}
-              <li class="node leaf-node"><label title="{{ leaf.convictions }} convictions"><input type="checkbox" name="builder" value="{{ leaf.builder }}"{{ ' checked' if leaf.builder in selected_builders }}> {{ leaf.builder }}</label></li>
-              {% endfor %}
-            </ul>
-            {% endif %}
+            {%- endif %}
           </details>
         </div>
       </li>
@@ -96,6 +155,16 @@
   </form>
 </details>
 {% endmacro %}
+
+{# A queue name outside this page's own vocabulary is dropped rather than refused, the way an
+   unreadable filter clause is, and named for the same reason: a scope that vanished silently would
+   read as a scope that covered everything. A builder the window does not hold is not named here —
+   that is a real queue asked over the wrong days, and widening the window brings it back. #}
+{% macro ignored_queues(ignored) %}
+{% if ignored %}
+<p class="note">Ignored {{ ignored | length }} queue name{{ '' if ignored | length == 1 else 's' }} this page cannot read: {{ ignored | join(', ') }}. Everything below is scoped by the rest.</p>
+{% endif %}
+{%- endmacro %}
 
 {% macro rolling_chooser(endpoint, window, choices, rolling, suite=None, filter_args={}) %}
 <div class="chooser">

@@ -270,15 +270,15 @@ function wireChipForm(form) {
 /*
  * Progressive enhancement for the queue picker's checkbox tree.
  *
- * The server unions whatever `group`/`version`/`builder` parameters a submitted GET request carries,
- * and a ticked box submits its own name with no help from here: with this file blocked, ticking a
- * group alone still submits `group=<name>` and every reader-visible control keeps working. What this
- * file adds is two things a static tree cannot do on its own: ticking a parent visually ticks its
- * children (and vice versa on unticking, up the chain), and it strips the children's own inputs back
- * out of the submission when a parent is ticked, so the request that leaves the browser stays exactly
- * `group=macOS` rather than every builder macOS happened to contain today. That distinction matters
- * because `group=macOS` also covers a builder added to the group next month; a URL that enumerated
- * today's builders would not.
+ * The server unions whatever `family`/`group`/`version`/`builder` parameters a submitted GET request
+ * carries, and a ticked box submits its own name with no help from here: with this file blocked,
+ * ticking a family alone still submits `family=<name>` and every reader-visible control keeps working.
+ * What this file adds is two things a static tree cannot do on its own: ticking a parent visually ticks
+ * its children (and vice versa on unticking, up the chain), and it strips the children's own inputs
+ * back out of the submission when a parent is ticked, so the request that leaves the browser stays
+ * exactly `group=macOS` rather than every builder macOS happened to contain today. That distinction
+ * matters because `group=macOS` also covers a builder added to the group next month; a URL that
+ * enumerated today's builders would not.
  */
 
 /**
@@ -336,7 +336,7 @@ function setQueueTreeImplied(input, implied) {
  * not blank.
  */
 function updateQueueTreeIndeterminate(form) {
-    form.querySelectorAll('input[name="group"], input[name="version"]').forEach(function (parent) {
+    form.querySelectorAll('input[name="family"], input[name="group"], input[name="version"]').forEach(function (parent) {
         var descendants = queueTreeDescendants(parent);
         if (!descendants.length) {
             return;
@@ -392,6 +392,11 @@ function applyQueueTreeChange(target) {
  * since a disabled checkbox cannot be unticked and rule 3 above depends on being able to untick one.
  */
 function collapseQueueTreeSubmission(form) {
+    form.querySelectorAll('input[name="family"]:checked').forEach(function (family) {
+        queueTreeDescendants(family).forEach(function (descendant) {
+            descendant.disabled = true;
+        });
+    });
     form.querySelectorAll('input[name="group"]:checked').forEach(function (group) {
         queueTreeDescendants(group).forEach(function (descendant) {
             descendant.disabled = true;
@@ -404,17 +409,32 @@ function collapseQueueTreeSubmission(form) {
     });
 }
 
+/**
+ * The server renders a selected parent's descendants checked, `implied` and DISABLED. Disabled is how
+ * they stay out of the submission with this file blocked, so Apply keeps sending `family=Linux` rather
+ * than every builder Linux holds today. Where this file runs, `collapseQueueTreeSubmission` does that
+ * job at submit time instead, so the load-time disabling is undone here: rule 3 above depends on being
+ * able to untick a descendant, and a disabled checkbox cannot be unticked. The `implied` markers the
+ * server rendered are left exactly as they are — they say the same thing a click would have said.
+ */
+function enableQueueTreeInherited(form) {
+    form.querySelectorAll('input[type=checkbox]:disabled').forEach(function (input) {
+        input.disabled = false;
+    });
+}
+
 function wireQueueTree(picker) {
     var form = picker.querySelector('form.filter-form');
     if (!form) {
         return;
     }
+    enableQueueTreeInherited(form);
     form.addEventListener('change', function (event) {
         var target = event.target;
         if (!target || !(target instanceof Element) || target.type !== 'checkbox') {
             return;
         }
-        if (['group', 'version', 'builder'].indexOf(target.name) === -1) {
+        if (['family', 'group', 'version', 'builder'].indexOf(target.name) === -1) {
             return;
         }
         applyQueueTreeChange(target);

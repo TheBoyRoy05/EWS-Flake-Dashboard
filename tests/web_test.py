@@ -201,6 +201,263 @@ class TestLanding(WebTest):
         self.assertIn('<span class="value">1</span>', page)
 
 
+class TestQueueFamilies(WebTest):
+    """The level above the queue groups: one row per platform family, addressable as `family=<name>`
+    with no script and no JavaScript, and a group still tickable on its own beneath it."""
+
+    WINDOWS_BUILDER = 'Win-Tests-EWS'
+
+    def spread(self) -> None:
+        """One convicted test on each of three families, so a family filter that reached the wrong one
+        shows up in what the page lists."""
+        self.store_build(1, flaky={'fast/mac.html': config.CLEAN_TREE})
+        self.store_build(2, flaky={'fast/gtk.html': config.CLEAN_TREE},
+                         builder=fixtures.GTK_BUILDER, builder_id=9)
+        self.store_build(3, flaky={'fast/win.html': config.CLEAN_TREE},
+                         builder=self.WINDOWS_BUILDER, builder_id=10)
+
+    def picker(self, page: str) -> str:
+        found = re.search(r'<details class="table-filter queue-tree".*?</form>\s*</details>',
+                          page, re.S)
+        self.assertIsNotNone(found, 'no queue picker form on the page')
+        return found.group(0)
+
+    def tally(self, picker: str, label: str) -> int:
+        """The count printed beside one family, group or version row."""
+        found = re.search(rf'<summary>{re.escape(label)} <span class="tally">([\d,]+)</span>',
+                          picker)
+        self.assertIsNotNone(found, f'no row labelled {label} in the picker')
+        return int(found.group(1).replace(',', ''))
+
+    def test_the_families_sit_above_the_groups_and_the_groups_are_still_there(self) -> None:
+        self.spread()
+        picker = self.picker(self.page('/'))
+        self.assertLess(picker.index('value="Apple"'), picker.index('value="macOS"'))
+        self.assertLess(picker.index('value="Linux"'), picker.index('value="GTK"'))
+        for value in ('Apple', 'Linux', 'Windows'):
+            self.assertIn(f'<input type="checkbox" name="family" value="{value}"', picker)
+        for value in ('macOS', 'GTK'):
+            self.assertIn(f'<input type="checkbox" name="group" value="{value}"', picker)
+
+    def test_a_family_narrows_the_page_to_its_own_groups(self) -> None:
+        self.spread()
+        apple = self.page('/tests?family=Apple')
+        self.assertIn('fast/mac.html', apple)
+        self.assertNotIn('fast/gtk.html', apple)
+        self.assertNotIn('fast/win.html', apple)
+
+        linux = self.page('/tests?family=Linux')
+        self.assertIn('fast/gtk.html', linux)
+        self.assertNotIn('fast/mac.html', linux)
+
+    def test_two_families_are_unioned_the_way_two_groups_are(self) -> None:
+        self.spread()
+        page = self.page('/tests?family=Apple&family=Linux')
+        self.assertIn('fast/mac.html', page)
+        self.assertIn('fast/gtk.html', page)
+        self.assertNotIn('fast/win.html', page)
+
+    def test_a_group_link_written_before_this_level_existed_still_selects_that_group(self) -> None:
+        self.spread()
+        page = self.page('/tests?group=GTK')
+        self.assertIn('fast/gtk.html', page)
+        self.assertNotIn('fast/mac.html', page)
+        self.assertRegex(self.picker(page),
+                         r'<input type="checkbox" name="group" value="GTK"[^>]* checked>')
+
+    def test_a_chosen_family_is_marked_checked_and_another_is_not(self) -> None:
+        self.spread()
+        picker = self.picker(self.page('/?family=Linux'))
+        self.assertRegex(picker, r'<input type="checkbox" name="family" value="Linux"[^>]* checked>')
+        self.assertNotRegex(picker,
+                            r'<input type="checkbox" name="family" value="Apple"[^>]* checked')
+        self.assertRegex(self.page('/?family=Linux'),
+                         r'<summary class="active" aria-label="Filter by queue">')
+
+    def test_an_unknown_family_is_ignored_and_named_rather_than_refused(self) -> None:
+        self.spread()
+        page = self.page('/tests?family=Solaris')
+        self.assertIn('Ignored 1 queue name this page cannot read: family=Solaris.', page)
+        self.assertIn('fast/mac.html', page)
+        self.assertIn('fast/gtk.html', page)
+
+    def test_an_unknown_family_beside_a_known_one_narrows_by_the_known_one(self) -> None:
+        self.spread()
+        page = self.page('/tests?family=Solaris&family=Linux')
+        self.assertIn('Ignored 1 queue name', page)
+        self.assertIn('fast/gtk.html', page)
+        self.assertNotIn('fast/mac.html', page)
+
+    def test_an_unreadable_group_and_version_are_named_the_same_way(self) -> None:
+        """All three come from a fixed vocabulary, so all three are named; a builder the window does
+        not hold is a real queue asked over the wrong days and is not."""
+        self.spread()
+        page = self.page('/tests?group=Solaris&version=macOS&family=Solaris')
+        self.assertIn('Ignored 3 queue names this page cannot read: '
+                      'family=Solaris, group=Solaris, version=macOS.', page)
+        self.assertNotIn('queue name', self.page('/tests?builder=not-a-queue'))
+
+    def test_every_page_carrying_the_picker_reads_a_family(self) -> None:
+        self.spread()
+        for path in ('/', '/explore', '/tests', '/escapes'):
+            self.assertEqual(self.client.get(f'{path}?family=Apple').status_code, 200, path)
+            self.assertIn('Ignored 1 queue name',
+                          self.page(f'{path}?family=Solaris'), path)
+
+    def test_a_count_beside_a_family_is_the_sum_of_the_groups_under_it(self) -> None:
+        self.store_build(1, flaky={'fast/mac.html': config.CLEAN_TREE})
+        self.store_build(2, flaky={'fast/ios.html': config.CLEAN_TREE},
+                         builder=fixtures.IOS_BUILDER, builder_id=11)
+        self.store_build(3, flaky={'fast/gtk.html': config.CLEAN_TREE},
+                         builder=fixtures.GTK_BUILDER, builder_id=9)
+        picker = self.picker(self.page('/'))
+        self.assertEqual(self.tally(picker, 'Apple'),
+                         self.tally(picker, 'macOS') + self.tally(picker, 'iOS'))
+        self.assertEqual(self.tally(picker, 'Linux'), self.tally(picker, 'GTK'))
+
+    def test_a_family_holding_one_group_of_its_own_name_draws_one_row(self) -> None:
+        """`Windows` under `Windows` would repeat itself, so the family row stands alone and carries
+        the builders directly."""
+        self.spread()
+        picker = self.picker(self.page('/'))
+        self.assertIn('<input type="checkbox" name="family" value="Windows"', picker)
+        self.assertNotIn('<input type="checkbox" name="group" value="Windows"', picker)
+        self.assertIn(f'name="builder" value="{self.WINDOWS_BUILDER}"', picker)
+
+    def test_that_row_reads_as_checked_for_the_group_link_it_replaced(self) -> None:
+        """`group=Windows` has no checkbox of its own any more, so the family's box shows the reader
+        what their link selected rather than leaving the picker blank."""
+        self.spread()
+        page = self.page('/tests?group=Windows')
+        self.assertIn('fast/win.html', page)
+        self.assertNotIn('fast/gtk.html', page)
+        self.assertRegex(self.picker(page),
+                         r'<input type="checkbox" name="family" value="Windows"[^>]* checked>')
+
+    def test_the_picker_form_holds_no_hidden_copy_of_the_family(self) -> None:
+        """The picker's own checkboxes are the queue selection, so a hidden `family` beside them would
+        keep submitting a family a reader had just unticked."""
+        self.spread()
+        self.assertNotRegex(self.picker(self.page('/?family=Linux')),
+                            r'<input type="hidden" name="family"')
+
+    def test_the_other_forms_and_links_carry_the_family_they_are_not_editing(self) -> None:
+        self.spread()
+        for path, page in (('/', self.page('/?family=Linux')),
+                           ('/tests', self.page('/tests?family=Linux')),
+                           ('/escapes', self.page('/escapes?family=Linux')),
+                           ('/explore', self.page('/explore?family=Linux'))):
+            self.assertIn('family=Linux', page, path)
+        self.assertIn('<input type="hidden" name="family" value="Linux">',
+                      self.page('/tests?family=Linux'))
+
+
+class TestInheritedTicks(WebTest):
+    """What the SERVER renders under a selected parent.
+
+    The page a reader lands on after Apply is server-rendered, and it used to show the parent named in
+    the query ticked over blank children: `group=macOS` rendered one checked box among ten unchecked
+    descendants, which reads as a selection that lost its contents. `dashboard.js` only ever added the
+    implied marker on a click, so no reload ever carried it. Every level inherits here instead, and the
+    inherited boxes are `disabled` so a submission with the script blocked still sends the parent's own
+    value rather than growing into an enumeration of today's builders.
+    """
+
+    BOX = re.compile(r'<input type="checkbox" name="(\w+)" value="([^"]+)"([^>]*)>')
+
+    def spread(self) -> None:
+        """Two macOS versions, two Linux groups and a Windows queue, so a family, a group and a version
+        each have something to inherit to."""
+        self.store_build(1, flaky={'fast/sequoia.html': config.CLEAN_TREE})
+        self.store_build(2, flaky={'fast/tahoe.html': config.CLEAN_TREE},
+                         builder=fixtures.API_BUILDER, builder_id=8)
+        self.store_build(3, flaky={'fast/gtk.html': config.CLEAN_TREE},
+                         builder=fixtures.GTK_BUILDER, builder_id=9)
+        self.store_build(4, flaky={'fast/wpe.html': config.CLEAN_TREE},
+                         builder=fixtures.WPE_BUILDER, builder_id=10)
+
+    def boxes(self, path: str) -> list:
+        """Every checkbox in the picker, as (name, value, checked, implied, submitted)."""
+        page = self.page(path)
+        found = re.search(r'<details class="table-filter queue-tree".*?</form>', page, re.S)
+        self.assertIsNotNone(found, f'no queue picker on {path}')
+        form = found.group(0)
+        self.assertNotIn('&#34;', form, 'an attribute was escaped into the markup')
+        return [(name, value, ' checked' in rest, ' disabled' in rest, ' disabled' not in rest)
+                for name, value, rest in self.BOX.findall(form)]
+
+    def rendered(self, path: str) -> tuple:
+        """How many boxes the page rendered checked, how many of those are inherited, and what a
+        submission of the form would carry."""
+        boxes = self.boxes(path)
+        checked = [box for box in boxes if box[2]]
+        return (len(checked),
+                len([box for box in checked if box[3]]),
+                sorted(f'{name}={value}' for name, value, _, _, submitted in checked if submitted))
+
+    def implied_rows(self, path: str) -> int:
+        """Rows carrying the implied marker: a group or version row, or a builder's own label."""
+        return len(re.findall(r'class="row implied"|<label class="implied"', self.page(path)))
+
+    def test_a_selected_family_renders_its_groups_versions_and_builders_checked(self) -> None:
+        self.spread()
+        checked, inherited, submitted = self.rendered('/?family=Linux')
+        # Linux itself, GTK and WPE, and one builder under each.
+        self.assertEqual((checked, inherited), (5, 4))
+        self.assertEqual(submitted, ['family=Linux'])
+        self.assertEqual(self.implied_rows('/?family=Linux'), 4)
+
+    def test_a_selected_group_renders_its_versions_and_builders_checked(self) -> None:
+        self.spread()
+        checked, inherited, submitted = self.rendered('/?group=macOS')
+        # macOS itself, its Sequoia and Tahoe versions, and one builder under each.
+        self.assertEqual((checked, inherited), (5, 4))
+        self.assertEqual(submitted, ['group=macOS'])
+
+    def test_a_selected_version_renders_its_builders_checked(self) -> None:
+        self.spread()
+        checked, inherited, submitted = self.rendered('/?version=macOS:Sequoia')
+        self.assertEqual((checked, inherited), (2, 1))
+        self.assertEqual(submitted, ['version=macOS:Sequoia'])
+
+    def test_nothing_inherits_from_a_builder_or_from_an_empty_selection(self) -> None:
+        self.spread()
+        self.assertEqual(self.rendered(f'/?builder={fixtures.GTK_BUILDER}'),
+                         (1, 0, [f'builder={fixtures.GTK_BUILDER}']))
+        self.assertEqual(self.rendered('/'), (0, 0, []))
+
+    def test_a_sibling_outside_the_selection_is_left_alone(self) -> None:
+        """Inheritance runs downward only: Linux must not tick macOS, and its own groups must not tick
+        each other."""
+        self.spread()
+        for name, value, checked, _, _ in self.boxes('/?family=Linux'):
+            expected = value in ('Linux', 'GTK', 'WPE', fixtures.GTK_BUILDER, fixtures.WPE_BUILDER)
+            self.assertEqual(checked, expected, f'{name}={value}')
+
+    def test_a_descendant_the_query_named_itself_is_not_marked_inherited(self) -> None:
+        """`family=Linux&group=GTK` names GTK by hand, so GTK keeps submitting itself and reads as an
+        explicit tick rather than one this page filled in."""
+        self.spread()
+        checked, inherited, submitted = self.rendered('/?family=Linux&group=GTK')
+        self.assertEqual((checked, inherited), (5, 3))
+        self.assertEqual(submitted, ['family=Linux', 'group=GTK'])
+
+    def test_an_inherited_tick_is_never_submitted_so_a_scriptless_apply_cannot_grow_the_url(self) -> None:
+        """The whole reason the inherited boxes are disabled: with the script blocked, a submission of
+        this form must still carry the family's own value and not every builder it holds today."""
+        self.spread()
+        for path, expected in (('/?family=Linux', ['family=Linux']),
+                               ('/?group=macOS', ['group=macOS']),
+                               ('/?version=macOS:Sequoia', ['version=macOS:Sequoia']),
+                               ('/?family=Apple', ['family=Apple'])):
+            self.assertEqual(self.rendered(path)[2], expected, path)
+
+    def test_every_page_carrying_the_picker_inherits_the_same_way(self) -> None:
+        self.spread()
+        for path in ('/', '/explore', '/tests', '/escapes'):
+            self.assertEqual(self.rendered(f'{path}?family=Linux')[:2], (5, 4), path)
+
+
 class TestFreshnessDismissal(WebTest):
     """Dismissing the freshness banner is a request rather than a click handler, since the app ships
     no JavaScript and a banner hidden on one page has to stay hidden on the next."""

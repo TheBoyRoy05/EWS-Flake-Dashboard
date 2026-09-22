@@ -12,6 +12,8 @@ better than a second copy would.
 
 Behind the front page, Explore holds two panes side by side — the failing builds in the queues picked from the header dropdown, then one build's author-visible failures with what main says about each and why that verdict was reached. Every filter is a link, so any view is a URL you can send someone. A legend at the foot of the page glosses every build-state chip with a live count and a link back to the pane narrowed to it where one is honestly obtainable from the same scoped query the pane above already ran; the test-verdict table beside it carries no count column.
 
+The queue dropdown in every page's header is four levels deep: platform family, then queue group, then OS version where a version actually divides the group, then the individual builder. Apple holds macOS, iOS and visionOS; Linux holds GTK and WPE; Windows and the leftover `other` bucket are each their own family, so every group sits under exactly one — a family holding a single group of its own name draws one row rather than repeating itself. Each level is an independent, repeatable query argument, and a tick submits only its own value: `?family=Apple`, `?group=macOS`, `?version=macOS:Sequoia`, `?builder=macOS-Sequoia-Release-WK2-Tests-EWS`, unioned when several are given. A version is group-qualified so `version=iOS:26` cannot also reach the visionOS 26 simulator. Selecting a parent covers whatever it contains later too, which enumerating today's builders would not, so the query stays short and stays true; a family, group or version name the page cannot read is ignored and named on the page rather than refusing the request. Beside each parent is the convictions its own subtree holds, summed from the same builder counts. A selected parent renders its descendants ticked and marked as inherited rather than set by hand — tinted with an accent bar down the left — so a page arrived at by URL reads the same as one arrived at by clicking, and those inherited boxes are not submitted, which is what keeps the query from growing.
+
 Tests holds the convicted-test table: one row per test, with every flake type it was convicted under, how many times, on how many queues, and when it was last seen. Clicking a test opens a drilldown beside the table listing every conviction of that one test — its build, queue, flake type and when. The table is filtered and ordered by two repeatable query arguments, which the *Filter and sort* disclosure in its header writes for you: `f.tests=<column>:<condition>:<value>` and `s.tests=<column>:<asc|desc>`. Both are read in the order they are written, so two filters both apply and two sorts are a primary and a secondary key — `?f.tests=test:has:editing&f.tests=convictions:ge:3&s.tests=last_seen:desc&s.tests=test:asc`. The columns and the conditions each one takes are listed in the disclosure and defined in `analysis/filters.py`, which is the only place a request can name a column at all; a clause it cannot read is ignored and named on the page rather than refusing the request, since a URL is the whole of this page's state. A legend at the foot of the page glosses each flake type, with a conviction count for the window and a link to the table narrowed to it.
 
 ## Running it
@@ -108,9 +110,10 @@ There is no CDN, no build step and no npm. The chart is server-generated SVG, an
 `ews_dashboard/web/static/dashboard.css` is the whole stylesheet, so the pages render from a
 checkout with no network. `ews_dashboard/web/static/dashboard.js` is the one script, a plain file
 with no framework that enhances the tests page's filter/sort chips and the queue picker's checkbox
-tree — ticking a group or version there also ticks what it contains on screen, and narrows the
+tree — ticking a family, group or version there also ticks what it contains on screen, and narrows the
 submitted query to that parent's own value rather than every builder it happens to contain today;
-every page works the same, one request per click, with it blocked.
+every page works the same, one request per click, with it blocked. The server renders the same
+inherited ticks on load, so the two paths agree.
 
 Known gaps and planned work are tracked in [`docs/open-work.md`](docs/open-work.md), not an issue
 tracker, so a reader looking at the code can see in one place what is not done yet and why.

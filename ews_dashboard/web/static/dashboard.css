@@ -1138,14 +1138,20 @@ code {
     margin-left: 0;
 }
 
+/* Anchored to the pill's RIGHT edge, not its left: the picker sits in the right-hand column of the
+   headline, so a popup opening rightward has only the margin between the pill and the viewport edge to
+   grow into — 265px at 1000px wide — and a 45-character builder name three levels in then wrapped one
+   hyphenated segment per line, seven lines for one queue. Opening leftward over the headline instead
+   gives it the pill's own offset to use, so the widths below fit at 1000, 1200 and 1500. */
 .queue-tree .filter-form {
     display: block;
     position: absolute;
     top: calc(100% + 4px);
-    left: 0;
+    left: auto;
+    right: 0;
     z-index: 20;
-    min-width: 16rem;
-    max-width: 22rem;
+    min-width: 26rem;
+    max-width: 26rem;
     max-height: 60vh;
     overflow-y: auto;
     padding: 8px;
@@ -1155,14 +1161,24 @@ code {
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 }
 
+/* A builder name is the longest text in the tree and sits at its deepest level, where the indentation
+   has already taken its width. It breaks at its own hyphens; this keeps it from breaking mid-word into
+   a column two characters wide when even that is not enough. */
+.queue-tree .leaf-node > label {
+    overflow-wrap: break-word;
+}
+
 .queue-tree ul {
     list-style: none;
     margin: 0;
     padding: 0;
 }
 
+/* Four levels of nesting now sit inside a 22rem popup, so each one is indented by less than the three
+   levels needed: 14px each put a builder name's first character 42px in and drove every one of them
+   onto a third line. */
 .queue-tree ul ul {
-    padding-left: 14px;
+    padding-left: 10px;
     border-left: 1px solid var(--border);
     margin-left: 5px;
 }
@@ -1194,9 +1210,46 @@ code {
 
 /* `dashboard.js` adds this class to a box it ticked or unticked on a reader's behalf because a parent
    was ticked, so a reader can tell that state apart from one they set themselves; static markup never
-   carries the class, since only script can know which boxes it moved. */
-.queue-tree .implied {
-    opacity: 0.6;
+   carries the class, since only script can know which boxes it moved.
+
+   An implied tick is ON, and the treatment has to say so first. `opacity: 0.6` said the opposite: it
+   dimmed the row to about the weight of an unticked one, so the ten descendants of a ticked group read
+   as "not selected" and the owner reported the parent as not ticking its children at all. Nothing here
+   dims. The row keeps full-strength text, takes an accent tint, and carries an accent bar down its left
+   edge; the tint and the bar are what an explicit tick does not have, which is where the distinction
+   now lives. The ON state itself is carried by the checkbox's own tick, not by colour, so it survives
+   for a reader who cannot separate the tint from the panel behind it. */
+.queue-tree .node > .row.implied,
+.queue-tree .leaf-node > label.implied {
+    background: var(--accent-soft);
+    box-shadow: inset 2px 0 0 var(--accent);
+    color: var(--ink);
+}
+
+/* A server-rendered implied box is `disabled`, which is what keeps it out of a scriptless submission
+   (see parts.html). Browsers grey a disabled tick; the row's tint and bar carry the ON reading either
+   way, and nothing here dims the label beside it. */
+.queue-tree .implied input[type=checkbox]:disabled {
+    accent-color: var(--accent);
+    opacity: 1;
+    cursor: default;
+}
+
+/* Hover has to keep answering on an implied row, which the tint above would otherwise sit on top of.
+   The bar stays: this rule replaces the background alone. */
+.queue-tree .node > .row.implied:hover,
+.queue-tree .leaf-node > label.implied:hover {
+    background: var(--panel-hover);
+}
+
+/* A count beside a family, group or version: the convictions underneath it, summed from the same
+   builder leaves the tooltip on a leaf prints. Tabular figures so the column of them does not jitter
+   as digits change. */
+.queue-tree .tally {
+    margin-left: 4px;
+    color: var(--faint);
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
 }
 
 /* The group/version checkbox is a sibling of the `<details>` it sits beside rather than a descendant
@@ -1223,6 +1276,15 @@ code {
 
 .queue-tree .tree-node[open] > summary::after {
     content: '▴';
+}
+
+/* Three weights for three levels, read top to bottom: a family leads, a group sits under it, a version
+   under that. Weight and indentation carry the hierarchy; the names stay Title Case as they are
+   everywhere else on these pages. */
+.queue-tree .family-node > .row > .tree-node > summary {
+    color: var(--ink);
+    font-weight: 700;
+    letter-spacing: 0.02em;
 }
 
 .queue-tree .group-node > .row > .tree-node > summary {

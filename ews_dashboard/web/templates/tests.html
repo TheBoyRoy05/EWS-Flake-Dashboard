@@ -1,5 +1,5 @@
 {% extends 'base.html' %}
-{% from 'parts.html' import window_chooser, suite_chooser, queue_dropdown, staleness %}
+{% from 'parts.html' import window_chooser, suite_chooser, queue_dropdown, staleness, ignored_queues %}
 
 {% block title %}EWS flake detection — tests{% endblock %}
 
@@ -7,7 +7,7 @@
 {# Everything a link has to keep hold of to leave the page reading as it did: the table's own
    filters and sorts, and the test open in the drilldown beside it. Not a clause that did not parse,
    which is not part of what the page is showing. #}
-{% set filter_args = {filter_argument: asked.filter_clauses, sort_argument: asked.sort_clauses, 'test': test_filter, 'group': group, 'version': version, 'builder': builder} %}
+{% set filter_args = {filter_argument: asked.filter_clauses, sort_argument: asked.sort_clauses, 'test': test_filter, 'family': family, 'group': group, 'version': version, 'builder': builder} %}
 {# Every argument the current request carries, so a link can ask for the same page with one thing
    changed — here, which test's drilldown is open — without dropping anything else a reader set.
    `current_args` comes from the route rather than `request.args.to_dict(flat=False)` directly, since
@@ -31,6 +31,7 @@
 {%- for clause in asked.filter_clauses %}<input type="hidden" name="{{ filter_argument }}" value="{{ clause }}">{% endfor %}
 {%- for clause in asked.sort_clauses %}<input type="hidden" name="{{ sort_argument }}" value="{{ clause }}">{% endfor %}
 {%- if include_queue %}
+{%- for chosen in family %}<input type="hidden" name="family" value="{{ chosen }}">{% endfor %}
 {%- for chosen in group %}<input type="hidden" name="group" value="{{ chosen }}">{% endfor %}
 {%- for chosen in version %}<input type="hidden" name="version" value="{{ chosen }}">{% endfor %}
 {%- for chosen in builder %}<input type="hidden" name="builder" value="{{ chosen }}">{% endfor %}
@@ -55,6 +56,7 @@
 {% if asked.rejected %}
 <p class="note">Ignored {{ asked.rejected | length }} filter{{ '' if asked.rejected | length == 1 else 's' }} this page cannot read: {{ asked.rejected | join(', ') }}. Everything below is filtered by the rest.</p>
 {% endif %}
+{{ ignored_queues(queue_ignored) }}
 
 <div class="row headline">
   <div class="col-4">
@@ -63,7 +65,7 @@
   </div>
   <div class="col-8">
     <div class="chooser groups">
-      {{ queue_dropdown('tests', queue_tree, group, version, builder, queue_summary, held_fields(include_queue=False)) }}
+      {{ queue_dropdown('tests', queue_tree, group, version, builder, queue_summary, held_fields(include_queue=False), selected_families=family) }}
       {{ suite_chooser('tests', window, suite_choices, suite, filter_args=filter_args) }}
       {{ window_chooser('tests', window, window_choices, suite=suite, filter_args=filter_args) }}
     </div>
