@@ -51,15 +51,20 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ews_dashboard import config, queues, results, webkit_checkout
+from ews_dashboard.analysis import filters
 
-ESCAPED = 'ESCAPED'
-FAILS_ON_MAIN = 'FAILS_ON_MAIN'
-CONTAINED = 'CONTAINED'
-NO_RUNS = 'NO_RUNS'
-NO_BASELINE = 'NO_BASELINE'
-TREE_DIVERGED = 'TREE_DIVERGED'
+# Defined in `config` rather than here, and re-exported under these names so every reader of this
+# module still says `escapes.ESCAPED`. The registry in `analysis.filters` needs the same six strings
+# to validate a request's verdict against, and this module reads `filters` for its own clauses, so
+# the vocabulary has to live below both of them.
+ESCAPED = config.ESCAPED
+FAILS_ON_MAIN = config.FAILS_ON_MAIN
+CONTAINED = config.CONTAINED
+NO_RUNS = config.NO_RUNS
+NO_BASELINE = config.NO_BASELINE
+TREE_DIVERGED = config.TREE_DIVERGED
 
-VERDICTS = (ESCAPED, FAILS_ON_MAIN, CONTAINED, NO_RUNS, NO_BASELINE, TREE_DIVERGED)
+VERDICTS = config.ESCAPE_VERDICTS
 
 # How hard an escaped test failed after the landing. Derived from the stored counts on every read
 # rather than stored alongside them, so it can never contradict the numbers beside it.
@@ -108,7 +113,9 @@ UNAVAILABLE = 'unavailable'
 ESCAPE_WINDOW_SECONDS = config.ESCAPE_WINDOW_DAYS * 86400
 CURRENCY_WINDOW_SECONDS = config.CURRENCY_DAYS * 86400
 
-# One escape is worth reading about individually, so the list is long before it is cut.
+# One escape is worth reading about individually, so a page of them is long. It is a page size and no
+# longer a cap: `convictions` reports the total it was taken from and which page of it this is, so the
+# remainder is reachable rather than silently cut off at row 200.
 ESCAPES_LISTED = 200
 
 WINDOW = 'build.started_at >= :since AND build.started_at < :until'
@@ -175,6 +182,20 @@ def damage_for_counts(recent_runs: Optional[int], recent_failed: Optional[int]) 
     if not recent_runs or recent_failed is None:
         return None
     return recent_failed / recent_runs
+
+
+# The two derived figures, as sqlite functions, so a column can be ordered and narrowed by exactly
+# the number the page prints. `db.connect` registers these; nothing re-implements either formula in
+# SQL, which is the whole point — a stored or re-spelled strength is a second definition that can
+# disagree with the counts shown beside it.
+#
+# Both return None where their inputs carry no evidence, which arrives in SQL as NULL, so every
+# column built on them orders with `nulls_last` set: a row that answers nothing must not outrank one
+# that does, in either direction.
+SQL_FUNCTIONS = (
+    (config.ESCAPE_STRENGTH_FUNCTION, 2, strength_for_counts),
+    (config.ESCAPE_DAMAGE_FUNCTION, 2, damage_for_counts),
+)
 
 
 def _filters(suite: Optional[str], builders: tuple = ()) -> tuple:
@@ -683,13 +704,117 @@ def escape_subcategories(connection: sqlite3.Connection, since: int, until: int,
                          strong=counted[STRONG], rare=counted[RARE])
 
 
+@dataclass(frozen=True)
+class ConvictionPage:
+    """One page of the convictions behind a verdict's count, and where in the whole set it sits.
+
+    `total` is every conviction the query matched, not the page's own length, so a page can say how
+    many remain rather than stopping at its last row and leaving a reader to guess. `offset` is the
+    page's own start after clamping, which is what a link back to this page has to carry: a `page`
+    argument past the end is answered with the last page rather than an empty table, and a reader
+    whose URL said page 9 of 3 must not be handed links built on the 9.
+
+    Indices are 1-based because they are read as prose ("201 to 349 of 349"), and `first`/`last` are
+    both 0 on an empty page so neither reads as a row that is not there.
+    """
+
+    convictions: list
+    total: int
+    limit: int
+    offset: int
+
+    @property
+    def shown(self) -> int:
+        return len(self.convictions)
+
+    @property
+    def truncated(self) -> bool:
+        return self.total > self.shown
+
+    @property
+    def first(self) -> int:
+        return self.offset + 1 if self.convictions else 0
+
+    @property
+    def last(self) -> int:
+        return self.offset + self.shown
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.total - self.last)
+
+    @property
+    def pages(self) -> int:
+        """At least 1, so an empty set is page 1 of 1 rather than page 1 of 0."""
+        return max(1, -(-self.total // self.limit))
+
+    @property
+    def number(self) -> int:
+        return self.offset // self.limit + 1
+
+    @property
+    def next_page(self) -> Optional[int]:
+        return self.number + 1 if self.remaining else None
+
+    @property
+    def previous_page(self) -> Optional[int]:
+        return self.number - 1 if self.number > 1 else None
+
+
+def _page_offset(total: int, limit: int, page: int) -> int:
+    """Where a page starts, clamped into the set that exists.
+
+    A page below the first is the first and a page past the last is the last, because the page number
+    arrives in a URL as readily as from a link: a reader who narrowed the set while standing on page 3
+    is shown the end of the narrowed set, not a blank table they cannot tell from "nothing matched".
+    """
+    if page < 1 or total <= 0:
+        return 0
+    return min(page - 1, (total - 1) // limit) * limit
+
+
 def convictions(connection: sqlite3.Connection, since: int, until: int, verdict: str,
                 suite: Optional[str] = None, builders: tuple = (),
-                limit: int = ESCAPES_LISTED) -> 'list[Conviction]':
-    """The individual convictions behind one verdict's count, newest landing first."""
-    conditions, parameters = _filters(suite, builders)
-    parameters.update({'since': since, 'until': until, 'verdict': verdict, 'limit': limit})
-    return [
+                limit: int = ESCAPES_LISTED, page: int = 1, conditions: tuple = (),
+                sort_keys: tuple = ()) -> 'ConvictionPage':
+    """One page of the individual convictions behind one verdict's count, in the order asked for.
+
+    `conditions` and `sort_keys` come from `filters`, which owns every column name, operator and
+    expression a request can reach: nothing a reader typed is spelled into this SQL, only bound to it.
+    The strength and damage columns are ordered and narrowed through the sqlite functions
+    `db.connect` registers from `SQL_FUNCTIONS`, so the figure a page sorts by is the one it prints.
+
+    `page` is a number rather than an offset so the arithmetic lives here, where `limit` is known: a
+    caller that computed its own offset against a different limit would page over a set of a size the
+    query never used.
+
+    Every order ends in `filters.ESCAPES.tiebreak`, which is this table's primary key. LIMIT/OFFSET
+    over a partial order drops and duplicates rows across page boundaries, because nothing obliges
+    sqlite to break a tie the same way in two queries.
+    """
+    scoping, parameters = _filters(suite, builders)
+    where, having, bound = filters.clause(conditions)
+    if having:
+        # No ESCAPES column is an aggregate and none takes a `grouped` operator, so `clause` has
+        # nothing to put here. This query does not group, and a HAVING attached to it would be read
+        # over the whole result as one group; loud rather than silent, for whoever registers the
+        # first aggregate column on this table.
+        raise ValueError('the escapes listing does not group, so it cannot answer a HAVING clause')
+    parameters.update(bound)
+    parameters.update({'since': since, 'until': until, 'verdict': verdict})
+    narrowing = f' AND {where}' if where else ''
+    source = f'''FROM escape_verdicts AS outcome
+                JOIN build_verdicts AS build USING (build_id)
+                JOIN latest_flakiness_verdicts AS verdict
+                  ON verdict.build_id = outcome.build_id AND verdict.test_name = outcome.test_name
+                WHERE outcome.verdict = :verdict AND {WINDOW}{scoping}{narrowing}'''
+    # Counted through the same WHERE as the rows, and without the row query's correlated subqueries,
+    # so the two cannot disagree about the set this page was taken from.
+    total = connection.execute(f'SELECT COUNT(*) {source}', parameters).fetchone()[0]
+    size = max(1, limit)
+    offset = _page_offset(total, size, page)
+    parameters.update({'limit': size, 'offset': offset})
+    listed = [
         Conviction(
             test_name=row['test_name'],
             rule=row['rule'],
@@ -726,16 +851,13 @@ def convictions(connection: sqlite3.Connection, since: int, until: int, verdict:
                          WHERE other.pr_id = build.pr_id AND other.sha IS NOT NULL) AS heads,
                        (SELECT COUNT(*) FROM build_verdicts AS other
                          WHERE other.pr_id = build.pr_id) AS builds
-                FROM escape_verdicts AS outcome
-                JOIN build_verdicts AS build USING (build_id)
-                JOIN latest_flakiness_verdicts AS verdict
-                  ON verdict.build_id = outcome.build_id AND verdict.test_name = outcome.test_name
-                WHERE outcome.verdict = :verdict AND {WINDOW}{conditions}
-                ORDER BY outcome.window_ends_at DESC, outcome.build_id DESC, outcome.test_name
-                LIMIT :limit''',
+                {source}
+                ORDER BY {filters.order_by(filters.ESCAPES, sort_keys)}
+                LIMIT :limit OFFSET :offset''',
             parameters,
         )
     ]
+    return ConvictionPage(convictions=listed, total=total, limit=size, offset=offset)
 
 
 @dataclass(frozen=True)

@@ -9,7 +9,7 @@ from typing import Optional
 from unittest import mock
 
 from ews_dashboard import config, results
-from ews_dashboard.analysis import escapes
+from ews_dashboard.analysis import escapes, filters
 from tests import fixtures
 
 LANDED_AT = fixtures.DEFAULT_BUILD_TIME + 86400
@@ -914,8 +914,10 @@ class TestConvictions(fixtures.DatabaseTest):
         return build_id
 
     def _convictions(self, verdict: str, **scope: object) -> list:
+        """The page's rows alone, since every test in this class is about one row's own contents."""
         return escapes.convictions(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
-                                   fixtures.DEFAULT_BUILD_TIME + DAY, verdict, **scope)
+                                   fixtures.DEFAULT_BUILD_TIME + DAY, verdict,
+                                   **scope).convictions
 
     def test_only_the_convictions_with_the_asked_for_verdict_are_listed(self) -> None:
         self._convict(1, TEST, escapes.CONTAINED, pr_id=1)
@@ -1003,8 +1005,8 @@ class TestStoredLandingTime(fixtures.DatabaseTest):
     def _listed(self, verdict: str) -> escapes.Conviction:
         listed = escapes.convictions(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
                                      fixtures.DEFAULT_BUILD_TIME + DAY, verdict)
-        self.assertEqual(len(listed), 1)
-        return listed[0]
+        self.assertEqual(listed.total, 1)
+        return listed.convictions[0]
 
     def test_a_stored_landing_time_does_not_move_when_the_window_widens(self) -> None:
         """The whole point of storing it: the window's width is configuration, and back-deriving the
@@ -1066,3 +1068,195 @@ class TestStoredLandingTime(fixtures.DatabaseTest):
                         landed_at=int(time.time()) - 60)
 
         self.assertEqual(self._asked(fixtures.StubRunHistory({TEST: []})), 0)
+
+
+class TestListingOrder(fixtures.DatabaseTest):
+    """What `convictions` orders by, and what it does with a row that gathered no evidence.
+
+    The strength a page sorts by is the one it prints, because both go through
+    `strength_for_counts` — the sqlite function `db.connect` registers — rather than through a stored
+    column or the formula re-spelled in SQL.
+    """
+
+    def _convict(self, number: int, test_name: str, verdict: str, runs_after: int,
+                 failed_after: int, recent_runs: Optional[int] = None,
+                 recent_failed: Optional[int] = None,
+                 landed_at: Optional[int] = LANDED_AT) -> int:
+        build_id = self.store_build(number, flaky={test_name: config.CLEAN_TREE}, pr_id=number,
+                                    pr_title='A change that landed', sha='a' * 40)
+        with self.connection:
+            self.connection.execute(
+                '''INSERT INTO escape_verdicts (
+                    build_id, test_name, verdict, runs_before, failed_before, runs_after,
+                    failed_after, landed_at, window_ends_at, decided_at, recent_runs,
+                    recent_failed, recent_checked_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (build_id, test_name, verdict, 4, 0, runs_after, failed_after, landed_at,
+                 LANDED_AT + escapes.ESCAPE_WINDOW_SECONDS, LANDED_AT, recent_runs, recent_failed,
+                 LANDED_AT if recent_runs is not None else None),
+            )
+        return build_id
+
+    def _listed(self, verdict: str, **keywords: object) -> escapes.ConvictionPage:
+        return escapes.convictions(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                   fixtures.DEFAULT_BUILD_TIME + DAY, verdict, **keywords)
+
+    def _names(self, verdict: str, **keywords: object) -> list:
+        return [one.test_name for one in self._listed(verdict, **keywords).convictions]
+
+    def test_the_registered_function_answers_in_sql_what_the_dataclass_answers_in_python(self) -> None:
+        """One definition, called from two places: if these ever disagree the page is printing a
+        figure it did not sort by."""
+        self._convict(1, TEST, escapes.ESCAPED, runs_after=8, failed_after=1)
+        row = self.connection.execute(
+            f'SELECT {config.ESCAPE_STRENGTH_FUNCTION}(runs_after, failed_after) AS strength, '
+            f'{config.ESCAPE_DAMAGE_FUNCTION}(recent_runs, recent_failed) AS damage '
+            'FROM escape_verdicts').fetchone()
+        listed = self._listed(escapes.ESCAPED).convictions[0]
+        self.assertAlmostEqual(row['strength'], listed.strength, places=12)
+        self.assertIsNone(row['damage'])
+        self.assertIsNone(listed.damage)
+
+    def test_ordering_by_strength_puts_the_hardest_evidenced_escape_first(self) -> None:
+        """Which is what the page asks for by default — the default itself lives in the route, the
+        way the convicted-tests table's does, so here it is the keys that are passed in."""
+        self._convict(1, 'fast/thin.html', escapes.ESCAPED, runs_after=100, failed_after=1)
+        self._convict(2, 'fast/hard.html', escapes.ESCAPED, runs_after=10, failed_after=10)
+        self._convict(3, 'fast/half.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        keys = filters.sort_keys(filters.ESCAPES, (('strength', True),))
+        self.assertEqual(self._names(escapes.ESCAPED, sort_keys=keys),
+                         ['fast/hard.html', 'fast/half.html', 'fast/thin.html'])
+
+    def test_no_sort_key_at_all_still_leaves_a_total_order(self) -> None:
+        """The tiebreak is the table's primary key and is appended unconditionally, so a caller that
+        passes no key still gets an order two queries cannot disagree about."""
+        self._convict(1, 'fast/a.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        self._convict(2, 'fast/b.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        self.assertEqual(self._names(escapes.ESCAPED), ['fast/b.html', 'fast/a.html'])
+
+    def test_a_sort_key_the_request_asked_for_leads_the_fallback(self) -> None:
+        self._convict(1, 'fast/zzz.html', escapes.ESCAPED, runs_after=10, failed_after=10)
+        self._convict(2, 'fast/aaa.html', escapes.ESCAPED, runs_after=10, failed_after=1)
+        ascending = filters.sort_keys(filters.ESCAPES, (('test', False),))
+        self.assertEqual(self._names(escapes.ESCAPED, sort_keys=ascending),
+                         ['fast/aaa.html', 'fast/zzz.html'])
+
+    def test_a_row_with_no_evidence_sorts_last_whichever_way_strength_is_read(self) -> None:
+        """NO_RUNS stores no run after the landing, so its strength is None: sqlite would lead an
+        ascending page with it, and a row that answers nothing must not outrank one that does."""
+        self._convict(1, 'fast/none.html', escapes.NO_RUNS, runs_after=0, failed_after=0)
+        self._convict(2, 'fast/some.html', escapes.NO_RUNS, runs_after=10, failed_after=2)
+        for descending in (True, False):
+            keys = filters.sort_keys(filters.ESCAPES, (('strength', descending),))
+            self.assertEqual(self._names(escapes.NO_RUNS, sort_keys=keys),
+                             ['fast/some.html', 'fast/none.html'], descending)
+
+    def test_a_row_with_no_landing_time_sorts_last_too(self) -> None:
+        self._convict(1, 'fast/unknown.html', escapes.ESCAPED, runs_after=10, failed_after=5,
+                      landed_at=None)
+        self._convict(2, 'fast/known.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        for descending in (True, False):
+            keys = filters.sort_keys(filters.ESCAPES, (('landed', descending),))
+            self.assertEqual(self._names(escapes.ESCAPED, sort_keys=keys),
+                             ['fast/known.html', 'fast/unknown.html'], descending)
+
+    def test_a_condition_narrows_the_listing_and_the_total_with_it(self) -> None:
+        self._convict(1, 'fast/webgl/a.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        self._convict(2, 'fast/forms/b.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        conditions = filters.parse(filters.ESCAPES, (('test', 'has', 'webgl'),))
+        listed = self._listed(escapes.ESCAPED, conditions=conditions)
+        self.assertEqual([one.test_name for one in listed.convictions], ['fast/webgl/a.html'])
+        self.assertEqual(listed.total, 1)
+
+    def test_a_condition_on_a_derived_column_narrows_through_the_registered_function(self) -> None:
+        """The column is the function scaled to a percentage, so `at least 50` means the 50% a reader
+        sees in the cell."""
+        self._convict(1, 'fast/hard.html', escapes.ESCAPED, runs_after=100, failed_after=95)
+        self._convict(2, 'fast/thin.html', escapes.ESCAPED, runs_after=100, failed_after=1)
+        conditions = filters.parse(filters.ESCAPES, (('strength', 'ge', '50'),))
+        self.assertEqual([one.test_name for one in
+                          self._listed(escapes.ESCAPED, conditions=conditions).convictions],
+                         ['fast/hard.html'])
+
+    def test_a_grouped_clause_is_refused_rather_than_attached_to_a_query_that_never_groups(self) -> None:
+        """Nothing in the ESCAPES registry can produce a HAVING today. This is the guard for whoever
+        registers the first aggregate column: a HAVING on a query with no GROUP BY is read over the
+        whole result as one group, which would narrow by something nobody asked for."""
+        condition = filters.condition(filters.TESTS, 'convictions', 'gt', '2')
+        self.assertIsNotNone(condition)
+        with self.assertRaises(ValueError):
+            self._listed(escapes.ESCAPED, conditions=(condition,))
+
+
+class TestListingPages(fixtures.DatabaseTest):
+    """The 200-row cap is a page size now: the remainder is reachable and counted, not cut off."""
+
+    def _convict_many(self, count: int) -> None:
+        for number in range(1, count + 1):
+            build_id = self.store_build(number, flaky={f'fast/f{number:03d}.html': config.CLEAN_TREE},
+                                        pr_id=number, pr_title='A change that landed', sha='a' * 40)
+            with self.connection:
+                self.connection.execute(
+                    '''INSERT INTO escape_verdicts (
+                        build_id, test_name, verdict, runs_before, failed_before, runs_after,
+                        failed_after, landed_at, window_ends_at, decided_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                    (build_id, f'fast/f{number:03d}.html', escapes.ESCAPED, 4, 0, 10, number,
+                     LANDED_AT, LANDED_AT + escapes.ESCAPE_WINDOW_SECONDS, LANDED_AT),
+                )
+
+    def _page(self, page: int, limit: int = 2) -> escapes.ConvictionPage:
+        return escapes.convictions(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                   fixtures.DEFAULT_BUILD_TIME + DAY, escapes.ESCAPED,
+                                   limit=limit, page=page)
+
+    def test_a_page_reports_the_whole_set_it_was_taken_from(self) -> None:
+        self._convict_many(5)
+        first = self._page(1)
+        self.assertEqual((first.shown, first.total, first.pages, first.number), (2, 5, 3, 1))
+        self.assertEqual((first.first, first.last, first.remaining), (1, 2, 3))
+        self.assertTrue(first.truncated)
+
+    def test_every_row_is_reachable_across_the_pages_and_none_is_reached_twice(self) -> None:
+        """The point of a total order behind LIMIT/OFFSET: a partial one drops a row from one page
+        and repeats it on the next."""
+        self._convict_many(5)
+        seen = []
+        for number in range(1, 4):
+            seen.extend(one.test_name for one in self._page(number).convictions)
+        self.assertEqual(len(seen), 5)
+        self.assertEqual(len(set(seen)), 5)
+
+    def test_the_last_page_has_no_next_and_the_first_has_no_previous(self) -> None:
+        self._convict_many(5)
+        self.assertIsNone(self._page(1).previous_page)
+        self.assertEqual(self._page(1).next_page, 2)
+        last = self._page(3)
+        self.assertEqual((last.shown, last.remaining), (1, 0))
+        self.assertIsNone(last.next_page)
+        self.assertEqual(last.previous_page, 2)
+
+    def test_a_page_past_the_end_is_answered_with_the_last_page(self) -> None:
+        """A number in a URL, or a reader who narrowed the set while standing on page 3: an empty
+        table reads as "nothing matched", which is not what happened."""
+        self._convict_many(5)
+        clamped = self._page(9)
+        self.assertEqual(clamped.number, 3)
+        self.assertEqual(clamped.shown, 1)
+
+    def test_a_page_below_the_first_is_the_first(self) -> None:
+        self._convict_many(5)
+        self.assertEqual((self._page(0).number, self._page(-3).number), (1, 1))
+
+    def test_an_empty_set_is_one_page_of_nothing_rather_than_page_one_of_zero(self) -> None:
+        empty = self._page(1)
+        self.assertEqual((empty.total, empty.shown, empty.pages, empty.number), (0, 0, 1, 1))
+        self.assertEqual((empty.first, empty.last, empty.remaining), (0, 0, 0))
+        self.assertFalse(empty.truncated)
+        self.assertIsNone(empty.next_page)
+
+    def test_the_page_size_is_bounded_below_by_one_row(self) -> None:
+        """A limit of zero would make every page empty and the remainder unreachable, which is the
+        defect paging exists to close."""
+        self._convict_many(3)
+        self.assertEqual(self._page(1, limit=0).shown, 1)

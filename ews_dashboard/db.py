@@ -45,11 +45,35 @@ REPORTED_TABLES = (
 )
 
 
+def register_functions(connection: sqlite3.Connection) -> None:
+    """Register the derived figures a query may order or narrow by, as the Python that computes them.
+
+    This is what lets `ORDER BY escape_strength(...)` and the figure printed in the cell beside it be
+    one definition rather than two: the alternative is a stored column or the Wilson formula
+    re-spelled in SQL, either of which can drift from `strength_for_counts` and disagree with the
+    counts shown next to it.
+
+    `analysis.escapes` is imported here rather than at module scope. Checked, not assumed: it imports
+    `config`, `queues`, `results` and `webkit_checkout`, none of which import this module, so a
+    module-level import would not cycle today. It is deferred anyway for two reasons — this module is
+    the bottom of the stack and everything else imports it, so depending on `analysis` inverts that
+    and makes the first analysis module that wants `db.connect` a cycle; and `escapes` pulls in
+    `results`, so `python3 -m ews_dashboard.db` would load the HTTP layer to create a table.
+
+    `deterministic=True` lets sqlite treat a call as constant for one row, which is what an ORDER BY
+    over a function of two stored columns wants; both functions are pure.
+    """
+    from ews_dashboard.analysis import escapes
+    for name, arity, function in escapes.SQL_FUNCTIONS:
+        connection.create_function(name, arity, function, deterministic=True)
+
+
 def connect(path: Optional[str] = None) -> sqlite3.Connection:
     connection = sqlite3.connect(path or config.database_path(), timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute('PRAGMA foreign_keys = ON')
     connection.execute(f'PRAGMA busy_timeout = {BUSY_TIMEOUT_MILLISECONDS}')
+    register_functions(connection)
     return connection
 
 

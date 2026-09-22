@@ -42,6 +42,29 @@ CURRENCY_DAYS = 7
 # asked, so this costs a query per escape per day rather than one per conviction.
 CURRENCY_TTL_SECONDS = 24 * 3600
 
+# The buckets an escape check decides a conviction into, and the order a page lists them in.
+# `analysis.escapes` is where they are documented and it re-exports every one of these names, so
+# `escapes.ESCAPED` still reads as it did; they are *defined* here because `analysis.filters` needs
+# the vocabulary to validate a request's verdict against, and `analysis.escapes` reads `filters` for
+# its own filter and order clauses. A registry importing the names from that module would close a
+# cycle, and spelling the same six strings in both places would be two vocabularies that can drift.
+ESCAPED = 'ESCAPED'
+FAILS_ON_MAIN = 'FAILS_ON_MAIN'
+CONTAINED = 'CONTAINED'
+NO_RUNS = 'NO_RUNS'
+NO_BASELINE = 'NO_BASELINE'
+TREE_DIVERGED = 'TREE_DIVERGED'
+
+ESCAPE_VERDICTS = (ESCAPED, FAILS_ON_MAIN, CONTAINED, NO_RUNS, NO_BASELINE, TREE_DIVERGED)
+
+# What `escapes.strength_for_counts` and `escapes.damage_for_counts` are registered under on a
+# connection (`db.connect`), so a column can be ordered and narrowed by a figure the page derives on
+# read rather than by a second copy of the formula written in SQL. Named here for the same reason the
+# verdicts are: `filters` spells them into a column expression and `escapes` registers them, and
+# neither may import the other.
+ESCAPE_STRENGTH_FUNCTION = 'escape_strength'
+ESCAPE_DAMAGE_FUNCTION = 'escape_damage'
+
 # Above this many author-visible failures the build is a crash storm, not a set of test results;
 # classifying it test-by-test would cost hundreds of lookups to describe a broken checkout.
 MAX_CLASSIFIABLE_SURFACED_TESTS = 60

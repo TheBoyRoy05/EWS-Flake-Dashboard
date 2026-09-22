@@ -41,6 +41,16 @@ SUITE_CHOICES = tuple(suite.name for suite in suites.SUITES)
 # The column a page of convicted tests reads in when a request asked for no order of its own.
 DEFAULT_SORT = 'convictions'
 
+# The column a page of escape convictions reads in when a request asked for no order of its own:
+# hardest-evidenced escape first, which is what the page exists to surface, rather than the
+# newest landing it used to hard-code. Derived on read through the registered sqlite function, so the
+# order and the printed figure are one definition.
+ESCAPES_DEFAULT_SORT = 'strength'
+
+# Which page of the escapes listing to show. Named `page` rather than an offset because it is a URL a
+# reader can read, and the offset is derived from it against the page size the query actually used.
+PAGE_ARGUMENT = 'page'
+
 # The submit buttons that grow the filter and sort chip rows by one blank chip apiece. Named rather
 # than a shared name with different values, so a request can carry at most one of them and the route
 # never has to guess which row a bare "yes" was about.
@@ -264,7 +274,7 @@ def _carried_arguments() -> dict:
            if not name.startswith('_')}
 
 
-def _redirect_target(table: filters.Table) -> Optional[str]:
+def _redirect_target(table: filters.Table, endpoint: str) -> Optional[str]:
     """Where a chip-form submission belongs once its exploded columns, operators and values have been
     turned back into the canonical `f.<table>=`/`s.<table>=` spelling this page's own links speak, or
     None where the request already speaks that spelling and needs no redirect.
@@ -284,7 +294,7 @@ def _redirect_target(table: filters.Table) -> Optional[str]:
         filters.exploded_filter_specifications(request.args, table))
     kept[filters.sort_argument(table)] = list(
         filters.exploded_sort_specifications(request.args, table))
-    return url_for('tests', **kept)
+    return url_for(endpoint, **kept)
 
 
 def _chosen(name: str, choices: tuple, default: Optional[str] = None) -> Optional[str]:
@@ -394,13 +404,16 @@ def create_app(database_path: Optional[str] = None) -> Flask:
 
     @app.route('/tests')
     def tests() -> Union[str, Response]:
-        target = _redirect_target(filters.TESTS)
+        target = _redirect_target(filters.TESTS, 'tests')
         if target is not None:
             return redirect(target)
         return render_template('tests.html', **_tests_context(open_database(), _window()))
 
     @app.route('/escapes')
-    def escaped_regressions() -> str:
+    def escaped_regressions() -> Union[str, Response]:
+        target = _redirect_target(filters.ESCAPES, 'escaped_regressions')
+        if target is not None:
+            return redirect(target)
         return render_template('escapes.html', **_escapes_context(open_database(), _window()))
 
     @app.route('/dismiss-freshness')
@@ -552,7 +565,7 @@ def _tests_context(open_connection: sqlite3.Connection, window: Window) -> dict:
     suite, builders = scope.suite, scope.builders
     test_filter = request.args.get('test') or None
     asked = filters.requested(_canonical_filter_arguments(filters.TESTS), filters.TESTS)
-    primary = _primary_sort(asked.sort_keys)
+    primary = _primary_sort(filters.TESTS, asked.sort_keys, DEFAULT_SORT)
     convicted = convictions.convicted_tests(
         open_connection, window.since, window.until,
         suite=suite, builders=builders,
@@ -646,16 +659,41 @@ def _build_summaries(
     ]
 
 
+def _page_asked_for() -> int:
+    """Which page of the escapes listing a request asked for, as a number at least 1.
+
+    A page that is not a number, or is below the first, is the first rather than a refusal — the
+    argument arrives in a hand-edited URL as readily as from a link, and every other filter on these
+    pages drops what it cannot read. A page past the last is clamped by `escapes.convictions`, which
+    is the only place that knows how many there are.
+    """
+    try:
+        number = int(request.args.get(PAGE_ARGUMENT, 1))
+    except (TypeError, ValueError):
+        return 1
+    return max(1, number)
+
+
 def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dict:
     """The escape page: what main did with each convicted test after the change landed.
 
     Read-only like the others. Deciding an escape needs results.webkit.org and a checkout, so this
     page shows what the refresh has already decided and says how much it could not.
+
+    The listing is filtered, ordered and paged by the `f.escapes=`/`s.escapes=`/`page=` arguments,
+    every column name in them validated against `filters.ESCAPES` before any of it reaches SQL. The
+    verdict category the pane selects is applied on top of a reader's own clauses rather than by
+    them, so a `verdict` clause naming a different bucket narrows this page to nothing and says so —
+    see the ticket in docs/open-work.md about folding the pane's own `verdict=` into the grammar.
     """
     scope = _scope(open_connection, window)
     verdict_shown = _chosen('verdict', escapes.VERDICTS, escapes.ESCAPED)
-    drilled = escapes.convictions(open_connection, window.since, window.until, verdict_shown,
-                                  suite=scope.suite, builders=scope.builders)
+    asked = filters.requested(_canonical_filter_arguments(filters.ESCAPES), filters.ESCAPES)
+    primary = _primary_sort(filters.ESCAPES, asked.sort_keys, ESCAPES_DEFAULT_SORT)
+    listed = escapes.convictions(open_connection, window.since, window.until, verdict_shown,
+                                 suite=scope.suite, builders=scope.builders,
+                                 page=_page_asked_for(), conditions=asked.conditions,
+                                 sort_keys=_escape_order(asked.sort_keys))
     return dict(
         window=window,
         window_choices=WINDOW_CHOICES,
@@ -669,7 +707,7 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
         escaped_verdict=escapes.ESCAPED,
         subcategories=escapes.escape_subcategories(open_connection, window.since, window.until,
                                                    suite=scope.suite, builders=scope.builders),
-        convictions=drilled,
+        listed=listed,
         verdict_shown=verdict_shown,
         sentence=escapes.sentence,
         verdict_descriptions=escapes.VERDICT_DESCRIPTIONS,
@@ -677,6 +715,23 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
         window_days=config.ESCAPE_WINDOW_DAYS,
         failure_pct=config.ESCAPE_FAILURE_PCT,
         currency_days=config.CURRENCY_DAYS,
+        sort=primary.column.name,
+        descending=primary.descending,
+        descending_first=filters.ESCAPES.descending_first,
+        sort_label=primary.column.label,
+        escapes_table=filters.ESCAPES,
+        asked=asked,
+        page_argument=PAGE_ARGUMENT,
+        filter_argument=filters.filter_argument(filters.ESCAPES),
+        sort_argument=filters.sort_argument(filters.ESCAPES),
+        filter_chips=_filter_chips(asked, 1 if ADD_FILTER_ARGUMENT in request.args else 0),
+        sort_chips=_sort_chips(asked, 1 if ADD_SORT_ARGUMENT in request.args else 0),
+        add_filter_argument=ADD_FILTER_ARGUMENT,
+        add_sort_argument=ADD_SORT_ARGUMENT,
+        filter_chip_argument=filters.filter_chip_argument,
+        sort_chip_argument=filters.sort_chip_argument,
+        all_operators=filters.ALL_OPERATORS,
+        input_types=CHIP_INPUT_TYPES,
         links=links,
         **_freshness_context(open_connection),
     )
@@ -684,13 +739,18 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
 
 FALLBACK_SORT = ((DEFAULT_SORT, True), ('last_seen', True))
 
+# What a page of escape convictions falls back on: the strongest escapes first, then the most recent
+# landing among rows that tie on strength. `order_by` drops a fallback key that repeats a column the
+# request already ordered on, so asking for `strength:asc` does not get strength twice.
+ESCAPES_FALLBACK_SORT = ((ESCAPES_DEFAULT_SORT, True), ('landed', True))
 
-def _primary_sort(keys: tuple) -> filters.SortKey:
+
+def _primary_sort(table: filters.Table, keys: tuple, default: str) -> filters.SortKey:
     """The key a column heading marks as the one the table is ordered by, which is the first key a
-    request asked for or the default where it asked for none."""
+    request asked for or the table's default where it asked for none."""
     if keys:
         return keys[0]
-    return filters.sort_keys(filters.TESTS, ((DEFAULT_SORT, True),))[0]
+    return filters.sort_keys(table, ((default, True),))[0]
 
 
 def _test_order(keys: tuple) -> tuple:
@@ -702,6 +762,17 @@ def _test_order(keys: tuple) -> tuple:
     a column already ordered on.
     """
     return tuple(keys) + filters.sort_keys(filters.TESTS, FALLBACK_SORT)
+
+
+def _escape_order(keys: tuple) -> tuple:
+    """The sort keys behind a page of escape convictions: what the request asked for, then strength
+    and landing time, then the tiebreak `filters` adds.
+
+    The tiebreak is not decoration here the way it can look on an uncapped table: this listing pages
+    with LIMIT/OFFSET, and two queries that break a tie differently would drop a row from one page and
+    repeat it on the next.
+    """
+    return tuple(keys) + filters.sort_keys(filters.ESCAPES, ESCAPES_FALLBACK_SORT)
 
 
 def _build_detail(

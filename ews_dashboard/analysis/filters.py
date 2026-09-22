@@ -208,6 +208,12 @@ class Column:
     re-spelled rather than the output alias it is selected under, because the count query groups
     without selecting any aggregate at all and so has no alias in scope; `order_expression` keeps
     using the alias, which the page's own query does select.
+
+    `nulls_last` is for a column whose NULL means no evidence was gathered rather than a low value —
+    a strength over zero runs, a damage nobody has checked. sqlite sorts NULL first ascending, so
+    without it an ascending page leads with the rows that answer nothing; with it they sort last in
+    both directions, because a row with no evidence must not outrank one that has some whichever way
+    a reader reads the column.
     """
 
     name: str
@@ -219,6 +225,7 @@ class Column:
     sortable: bool = True
     filterable: bool = True
     descending_first: bool = True
+    nulls_last: bool = False
 
     @property
     def order_expression(self) -> str:
@@ -285,7 +292,46 @@ TESTS = _table(
     ),
 )
 
-TABLES = {TESTS.name: TESTS}
+# The escapes page's listing, which is one row per (build, test) rather than a grouped one — so no
+# column here is an aggregate and none is an ENUM_SET, and `clause` can never hand that query a
+# HAVING it has no GROUP BY to attach.
+#
+# `sortable=False` where an order would ship a grade this dashboard does not hold, which is the
+# judgment TESTS already makes for `rule`, `queue` and `suite`: rule, queue and verdict are names of
+# categories, and ordering a table by one of them alphabetically reads as ranking them. Verdict
+# especially — TREE_DIVERGED before ESCAPED is an accident of the alphabet, not a severity.
+#
+# `descending_first` follows what a column is read for: a rate, a count and a time are being asked
+# "which is worst" so they descend first, and a test name is being looked up so it ascends first.
+#
+# Strength and damage are percentages rather than fractions, so that the number a reader filters
+# against is the number the page prints ("at least 50" beside a cell reading 50%). Both are the
+# registered sqlite function and NOT a formula re-spelled here: two definitions of strength that can
+# drift is exactly what deriving it on read exists to prevent.
+ESCAPES = _table(
+    'escapes',
+    # The primary key of escape_verdicts, so every page of every order is a total order.
+    'outcome.build_id DESC, outcome.test_name ASC',
+    (
+        Column('test', 'Test', 'outcome.test_name', TEXT, descending_first=False),
+        Column('rule', 'Flake type', 'verdict.rule', ENUM, vocabulary=config.FLAKINESS_RULES,
+               sortable=False, descending_first=False),
+        Column('queue', 'Queue', 'build.builder', ENUM, sortable=False, descending_first=False),
+        Column('verdict', 'What main said', 'outcome.verdict', ENUM,
+               vocabulary=config.ESCAPE_VERDICTS, sortable=False, descending_first=False),
+        Column('landed', 'Landed', 'outcome.landed_at', TIMESTAMP, nulls_last=True),
+        Column('strength', 'Escape strength (%)',
+               f'{config.ESCAPE_STRENGTH_FUNCTION}(outcome.runs_after, outcome.failed_after) * 100',
+               INTEGER, nulls_last=True),
+        Column('damage', 'Current damage (%)',
+               f'{config.ESCAPE_DAMAGE_FUNCTION}(outcome.recent_runs, outcome.recent_failed) * 100',
+               INTEGER, nulls_last=True),
+        Column('runs_after', 'Runs after landing', 'outcome.runs_after', INTEGER),
+        Column('failed_after', 'Failures after landing', 'outcome.failed_after', INTEGER),
+    ),
+)
+
+TABLES = {TESTS.name: TESTS, ESCAPES.name: ESCAPES}
 
 
 @dataclass(frozen=True)
@@ -320,7 +366,17 @@ class SortKey:
 
     @property
     def sql(self) -> str:
-        return f'{self.column.order_expression} {"DESC" if self.descending else "ASC"}'
+        """The ORDER BY term, with a `nulls_last` column's NULLs pushed to the end of both directions.
+
+        Spelled `<expression> IS NULL ASC` rather than with `NULLS LAST`: it is the same order, it
+        needs no minimum sqlite version, and `order_by`'s dedupe is by column name so the extra term
+        cannot escape the key it belongs to.
+        """
+        direction = DESCENDING.upper() if self.descending else ASCENDING.upper()
+        ordered = f'{self.column.order_expression} {direction}'
+        if self.column.nulls_last:
+            return f'{self.column.order_expression} IS NULL ASC, {ordered}'
+        return ordered
 
     @property
     def specification(self) -> str:

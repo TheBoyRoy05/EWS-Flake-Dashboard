@@ -22,6 +22,12 @@ UNRELIABLE = 40.0
 FILTER = filters.filter_argument(filters.TESTS)
 SORT = filters.sort_argument(filters.TESTS)
 
+# And the escapes page's listing, which speaks the same grammar under its own table's name, plus the
+# argument naming which page of it to show.
+ESCAPE_FILTER = filters.filter_argument(filters.ESCAPES)
+ESCAPE_SORT = filters.sort_argument(filters.ESCAPES)
+PAGE = 'page'
+
 
 class WebTest(fixtures.DatabaseTest):
     def setUp(self) -> None:
@@ -1786,6 +1792,360 @@ class TestEscapes(WebTest):
         self.assertIn(
             'https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval'
             '#Wilson_score_interval', page)
+
+
+class EscapeRows(WebTest):
+    """A convicted test with a stored verdict, for the three classes below that need a listing to
+    order, narrow and page. Separate from `TestEscapes`'s own helper because these need the counts
+    behind strength and damage to differ from row to row."""
+
+    def _escape(self, number: int, test_name: str, runs_after: int, failed_after: int,
+                verdict: str = escapes.ESCAPED, recent_runs: Optional[int] = None,
+                recent_failed: Optional[int] = None,
+                landed_at: Optional[int] = fixtures.DEFAULT_BUILD_TIME) -> int:
+        build_id = self.store_build(number, flaky={test_name: config.CLEAN_TREE}, pr_id=number,
+                                    pr_title=f'Change {number}')
+        with self.connection:
+            self.connection.execute(
+                '''INSERT INTO escape_verdicts (
+                    build_id, test_name, verdict, runs_before, failed_before, runs_after,
+                    failed_after, landed_at, window_ends_at, decided_at, recent_runs,
+                    recent_failed, recent_checked_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (build_id, test_name, verdict, 4, 0, runs_after, failed_after, landed_at,
+                 int(time.time()), int(time.time()), recent_runs, recent_failed,
+                 int(time.time()) if recent_runs is not None else None),
+            )
+        return build_id
+
+    def rows_rendered(self, page: str) -> int:
+        """How many convictions the table listed, counted by the one link every row carries."""
+        return page.count('>Build</a>')
+
+
+class TestEscapesOrder(EscapeRows):
+    """The escapes listing's order, which is a URL rather than a click handler: the page must be
+    answerable by a plain GET with the script disabled, and survive a hand-edited argument."""
+
+    SORTED_HEADER = re.compile(r'<th class="[^"]*\bsorted\b[^"]*"><a[^>]*>([^<]+)')
+    STRENGTH_CELL = re.compile(r'>([\d.]+)%<span class="evidence">')
+
+    def _three_escapes(self) -> None:
+        self._escape(1, 'fast/thin.html', runs_after=100, failed_after=1)
+        self._escape(2, 'fast/hard.html', runs_after=10, failed_after=10)
+        self._escape(3, 'fast/half.html', runs_after=10, failed_after=5)
+
+    def _strengths(self, page: str) -> list:
+        return [float(figure) for figure in self.STRENGTH_CELL.findall(page)]
+
+    def _order(self, page: str, *names: str) -> list:
+        return [page.index(name) for name in names]
+
+    def _heading_link(self, page: str, key: str) -> str:
+        found = re.search(rf'<th class="sortable[^"]*"><a href="([^"]*{re.escape(ESCAPE_SORT)}='
+                          rf'{re.escape(key)}:[^"]*)"', page)
+        self.assertIsNotNone(found, f'no heading offered to sort by {key}')
+        return found.group(1).replace('&amp;', '&')
+
+    def test_the_default_order_is_strength_descending(self) -> None:
+        """The explicit replacement for newest-landing-first: the page exists to surface the escapes
+        whose evidence is hardest, and the figure it orders by is the one it prints."""
+        self._three_escapes()
+        strengths = self._strengths(self.page('/escapes'))
+        self.assertEqual(len(strengths), 3)
+        self.assertEqual(strengths, sorted(strengths, reverse=True))
+
+    def test_the_default_order_marks_the_strength_heading(self) -> None:
+        self._three_escapes()
+        self.assertEqual(set(self.SORTED_HEADER.findall(self.page('/escapes'))),
+                         {'Escape strength'})
+
+    def test_the_order_is_named_in_words_as_well_as_in_an_arrow(self) -> None:
+        """A reader can order this table by a column it does not print, and strength renders as a
+        dash on every category but ESCAPED, so an arrow alone can leave the order invisible."""
+        self._three_escapes()
+        self.assertIn('Ordered by Escape strength (%), highest first.', self.page('/escapes'))
+        self.assertIn('Ordered by Test, lowest first.',
+                      self.page(f'/escapes?{ESCAPE_SORT}=test:asc'))
+
+    def test_a_sort_argument_reorders_the_listed_convictions(self) -> None:
+        self._three_escapes()
+        ascending = self._order(self.page(f'/escapes?{ESCAPE_SORT}=test:asc'),
+                                'fast/half.html', 'fast/hard.html', 'fast/thin.html')
+        self.assertEqual(ascending, sorted(ascending))
+        descending = self._order(self.page(f'/escapes?{ESCAPE_SORT}=test:desc'),
+                                 'fast/thin.html', 'fast/hard.html', 'fast/half.html')
+        self.assertEqual(descending, sorted(descending))
+
+    def test_two_sorts_are_a_primary_and_a_secondary_key_in_the_order_written(self) -> None:
+        """Two escapes tie on strength, so only a secondary key can decide between them."""
+        self._escape(1, 'fast/zzz.html', runs_after=10, failed_after=5)
+        self._escape(2, 'fast/aaa.html', runs_after=10, failed_after=5)
+        forwards = self.page(f'/escapes?{ESCAPE_SORT}=strength:desc&{ESCAPE_SORT}=test:asc')
+        self.assertLess(forwards.index('fast/aaa.html'), forwards.index('fast/zzz.html'))
+        backwards = self.page(f'/escapes?{ESCAPE_SORT}=strength:desc&{ESCAPE_SORT}=test:desc')
+        self.assertLess(backwards.index('fast/zzz.html'), backwards.index('fast/aaa.html'))
+
+    def test_a_sort_key_that_is_not_a_key_falls_back_to_the_default_and_is_named(self) -> None:
+        self._three_escapes()
+        page = self.page(f'/escapes?{ESCAPE_SORT}=bogus')
+        self.assertEqual(set(self.SORTED_HEADER.findall(page)), {'Escape strength'})
+        self.assertIn('Ignored 1 filter this page cannot read: bogus', page)
+
+    def test_a_category_name_is_not_a_sort_key(self) -> None:
+        """Ordering a table by a bucket name ships a ranking the alphabet invented."""
+        self._three_escapes()
+        page = self.page(f'/escapes?{ESCAPE_SORT}=verdict:desc')
+        self.assertIn('Ignored 1 filter this page cannot read: verdict:desc', page)
+        self.assertEqual(set(self.SORTED_HEADER.findall(page)), {'Escape strength'})
+
+    def test_a_row_with_no_evidence_does_not_outrank_one_with_some(self) -> None:
+        """NO_RUNS has no run after the landing, so its strength is null; sqlite would lead an
+        ascending page with it."""
+        self._escape(1, 'fast/none.html', runs_after=0, failed_after=0, verdict=escapes.NO_RUNS)
+        self._escape(2, 'fast/some.html', runs_after=10, failed_after=2, verdict=escapes.NO_RUNS)
+        for direction in ('asc', 'desc'):
+            page = self.page(f'/escapes?verdict={escapes.NO_RUNS}'
+                             f'&{ESCAPE_SORT}=strength:{direction}')
+            self.assertLess(page.index('fast/some.html'), page.index('fast/none.html'), direction)
+
+    def test_a_heading_link_returns_the_reader_to_the_table_and_drops_the_page(self) -> None:
+        """Row 201 of one order is not row 201 of another."""
+        self._three_escapes()
+        link = self._heading_link(self.page(f'/escapes?{PAGE}=2'), 'test')
+        self.assertIn('#convictions', link)
+        self.assertNotIn(f'{PAGE}=', link)
+
+    def test_a_heading_link_replaces_the_order_rather_than_carrying_the_old_one_too(self) -> None:
+        self._three_escapes()
+        link = self._heading_link(self.page(f'/escapes?{ESCAPE_SORT}=landed:desc'), 'test')
+        self.assertIn(f'{ESCAPE_SORT}=test:asc', link)
+        self.assertNotIn('landed', link)
+
+    def test_a_heading_link_keeps_the_category_the_window_and_the_filter(self) -> None:
+        self._three_escapes()
+        page = self.page(f'/escapes?days=30&verdict={escapes.ESCAPED}'
+                         f'&{ESCAPE_FILTER}=test:has:fast')
+        link = self._heading_link(page, 'test')
+        self.assertIn('days=30', link)
+        self.assertIn(f'verdict={escapes.ESCAPED}', link)
+        self.assertIn(f'{ESCAPE_FILTER}=test:has:fast', link)
+
+    def test_a_scope_change_keeps_the_filter_and_the_order_being_read_in(self) -> None:
+        self._three_escapes()
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:fast&{ESCAPE_SORT}=test:asc')
+        for label in ('14d', 'all'):
+            link = self.chooser_link(page, label)
+            self.assertIn(f'{ESCAPE_FILTER}=test:has:fast', link)
+            self.assertIn(f'{ESCAPE_SORT}=test:asc', link)
+
+    def test_no_internal_control_opens_a_new_tab(self) -> None:
+        """Commit e7e1a8e made the outbound links open in a new tab and left in-place navigation
+        alone; the filter, sort and page controls added here are in-place navigation."""
+        self._three_escapes()
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:fast')
+        anchors = re.findall(r'<a[^>]*>', page)
+        internal = [anchor for anchor in anchors if 'href="/' in anchor]
+        self.assertTrue(internal)
+        for anchor in internal:
+            self.assertNotIn('target="_blank"', anchor)
+        for outbound in ('results.webkit.org', 'github.com'):
+            self.assertRegex(page, rf'<a href="[^"]*{re.escape(outbound)}[^"]*" target="_blank" '
+                                   r'rel="noopener">')
+
+    def test_the_filter_surface_is_a_details_holding_a_plain_get_form(self) -> None:
+        """No script makes this work: a details element, a GET form, and submit buttons the server
+        answers by re-rendering the page with one more chip."""
+        self._three_escapes()
+        page = self.page('/escapes')
+        self.assertIn('<details class="table-filter">', page)
+        self.assertIn('<form class="filter-form chip-form" method="get" action="/escapes"', page)
+        self.assertIn('<button type="submit" name="add_filter" value="1"', page)
+        self.assertIn('<button type="submit" name="add_sort" value="1"', page)
+        self.assertNotIn('onclick', page)
+        self.assertNotIn('javascript:', page)
+        # Two script elements and no more: base.html's shared dashboard.js, and a JSON data block
+        # that only feeds the progressive enhancement already there. No page control depends on it.
+        self.assertEqual(page.count('<script'), 2)
+        self.assertIn('<script type="application/json" id="filter-registry">', page)
+
+    def test_the_add_buttons_grow_the_chip_row_without_a_script(self) -> None:
+        self._three_escapes()
+        self.assertIn(f'name="{ESCAPE_FILTER}:0:column"', self.page('/escapes?add_filter=1'))
+        self.assertIn(f'name="{ESCAPE_SORT}:0:column"', self.page('/escapes?add_sort=1'))
+
+    def test_a_chip_form_submission_is_redirected_to_the_canonical_grammar(self) -> None:
+        """The chips submit three controls apiece because one string cannot be composed from three
+        without a script; the route turns them back into the clause its own links speak."""
+        self._three_escapes()
+        response = self.client.get(f'/escapes?{ESCAPE_FILTER}:0:column=test'
+                                   f'&{ESCAPE_FILTER}:0:op=has'
+                                   f'&{ESCAPE_FILTER}:0:value=hard'
+                                   f'&{ESCAPE_SORT}:0:column=landed'
+                                   f'&{ESCAPE_SORT}:0:direction=asc')
+        self.assertEqual(response.status_code, 302)
+        arguments = parse_qs(urlsplit(response.headers['Location']).query)
+        self.assertEqual(arguments[ESCAPE_FILTER], ['test:has:hard'])
+        self.assertEqual(arguments[ESCAPE_SORT], ['landed:asc'])
+
+
+class TestEscapesFilters(EscapeRows):
+    """`f.escapes=<column>:<condition>:<value>` is the whole of what a request can narrow the escapes
+    listing by. A clause this page cannot read is dropped and named rather than refused, because the
+    URL is the whole of this page's state."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._escape(1, 'fast/webgl/a.html', runs_after=100, failed_after=95)
+        self._escape(2, 'fast/forms/b.html', runs_after=100, failed_after=1)
+
+    def test_a_filter_narrows_the_rows_and_the_count_beside_them(self) -> None:
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:webgl')
+        self.assertIn('fast/webgl/a.html', page)
+        self.assertNotIn('fast/forms/b.html', page)
+        self.assertIn('all 1 shown', page)
+        self.assertIn('filtered by test:has:webgl', page)
+
+    def test_a_filter_on_a_derived_column_narrows_by_the_number_in_the_cell(self) -> None:
+        """The strength column is the registered sqlite function scaled to a percentage, so `at least
+        50` means the 50% a reader can see, and no second copy of the Wilson formula exists to drift
+        from it."""
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=strength:ge:50')
+        self.assertIn('fast/webgl/a.html', page)
+        self.assertNotIn('fast/forms/b.html', page)
+
+    def test_two_filters_both_apply(self) -> None:
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:fast'
+                         f'&{ESCAPE_FILTER}=strength:ge:50')
+        self.assertEqual(self.rows_rendered(page), 1)
+        self.assertIn('fast/webgl/a.html', page)
+
+    def test_a_filter_matching_nothing_says_so_rather_than_reading_as_an_empty_window(self) -> None:
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:nosuchtest')
+        self.assertIn('No conviction main answered this way matches test:has:nosuchtest', page)
+        self.assertNotIn('No conviction in this window escaped', page)
+
+    def test_a_clause_this_page_cannot_read_is_ignored_and_named_rather_than_refused(self) -> None:
+        response = self.client.get(f'/escapes?{ESCAPE_FILTER}=convictions:gt:2'
+                                   f'&{ESCAPE_FILTER}=test:has:webgl')
+        self.assertEqual(response.status_code, 200)
+        page = response.get_data(as_text=True)
+        self.assertIn('Ignored 1 filter this page cannot read: convictions:gt:2', page)
+        self.assertIn('Everything below is filtered by the rest.', page)
+        self.assertIn('fast/webgl/a.html', page)
+        self.assertNotIn('fast/forms/b.html', page)
+
+    def test_an_operator_the_column_does_not_allow_is_ignored_and_named(self) -> None:
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=test:gt:5')
+        self.assertIn('Ignored 1 filter this page cannot read: test:gt:5', page)
+
+    def test_a_value_that_will_not_coerce_is_ignored_and_named(self) -> None:
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=strength:ge:nearly')
+        self.assertIn('Ignored 1 filter this page cannot read: strength:ge:nearly', page)
+
+    def test_a_verdict_outside_the_vocabulary_is_ignored_and_named(self) -> None:
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=verdict:eq:ESCAPED_RARELY')
+        self.assertIn('Ignored 1 filter this page cannot read: verdict:eq:ESCAPED_RARELY', page)
+
+    def test_an_injection_payload_narrows_to_nothing_and_leaves_the_table_standing(self) -> None:
+        payload = quote('1); DROP TABLE build_verdicts; --')
+        response = self.client.get(f'/escapes?{ESCAPE_FILTER}=test:eq:{payload}')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'build_verdicts'").fetchone()[0], 1)
+
+    def test_clearing_the_filter_is_a_link_that_keeps_the_rest_of_the_page(self) -> None:
+        page = self.page(f'/escapes?days=30&{ESCAPE_FILTER}=test:has:webgl')
+        link = self.chooser_link(page, 'clear')
+        self.assertNotIn(f'{ESCAPE_FILTER}=', link)
+        self.assertIn('days=30', link)
+
+
+class TestEscapesPaging(EscapeRows):
+    """The 200-row cap was a silent truncation with no remainder indicator, which is what
+    docs/open-work.md recorded. It is a page size now: bounded, counted, and the rest reachable."""
+
+    def _convict_many(self, count: int) -> None:
+        for number in range(1, count + 1):
+            self._escape(number, f'fast/f{number}.html', runs_after=10, failed_after=number)
+
+    def _paged(self, limit: int) -> mock._patch:
+        """Shrinks the page size for one request, so a paging test needs five rows and not four
+        hundred."""
+        return mock.patch('ews_dashboard.web.app.escapes.convictions',
+                          functools.partial(escapes.convictions, limit=limit))
+
+    def test_the_page_size_bounds_the_rows_rendered(self) -> None:
+        self._convict_many(5)
+        with self._paged(2):
+            page = self.page('/escapes')
+        self.assertEqual(self.rows_rendered(page), 2)
+
+    def test_the_head_says_how_many_of_how_many_and_how_many_remain(self) -> None:
+        self._convict_many(5)
+        with self._paged(2):
+            page = self.page('/escapes')
+        self.assertIn('1–2 of 5, 3 more after this page', page)
+
+    def test_a_set_within_one_page_says_so_and_offers_no_pager(self) -> None:
+        self._convict_many(2)
+        with self._paged(2):
+            page = self.page('/escapes')
+        self.assertIn('all 2 shown', page)
+        self.assertNotIn('more after this page', page)
+        self.assertNotIn('next →', page)
+
+    def test_the_remainder_is_reachable_and_the_pager_says_where_it_is(self) -> None:
+        self._convict_many(5)
+        with self._paged(2):
+            first = self.page('/escapes')
+            last = self.page(f'/escapes?{PAGE}=3')
+        self.assertIn('Page 1 of 3', first)
+        self.assertIn('next →', first)
+        self.assertNotIn('← previous', first)
+        self.assertIn('Page 3 of 3', last)
+        self.assertIn('← previous', last)
+        self.assertNotIn('next →', last)
+        self.assertIn('5–5 of 5', last)
+
+    def test_every_row_appears_on_exactly_one_page(self) -> None:
+        self._convict_many(5)
+        with self._paged(2):
+            pages = [self.page(f'/escapes?{PAGE}={number}') for number in (1, 2, 3)]
+        for number in range(1, 6):
+            listing = [page for page in pages if f'fast/f{number}.html' in page]
+            self.assertEqual(len(listing), 1, number)
+
+    def test_a_page_past_the_end_shows_the_last_page_rather_than_an_empty_table(self) -> None:
+        self._convict_many(5)
+        with self._paged(2):
+            page = self.page(f'/escapes?{PAGE}=9')
+        self.assertIn('Page 3 of 3', page)
+        self.assertNotIn('No conviction', page)
+
+    def test_a_page_argument_that_is_not_a_number_is_ignored_rather_than_erroring(self) -> None:
+        self._convict_many(5)
+        with self._paged(2):
+            page = self.page(f'/escapes?{PAGE}=second')
+        self.assertIn('Page 1 of 3', page)
+
+    def test_a_page_link_keeps_the_filter_the_order_and_the_scope(self) -> None:
+        self._convict_many(5)
+        with self._paged(2):
+            page = self.page(f'/escapes?days=30&{ESCAPE_FILTER}=test:has:fast'
+                             f'&{ESCAPE_SORT}=test:asc')
+        link = self.chooser_link(page, 'next →')
+        self.assertIn('days=30', link)
+        self.assertIn(f'{ESCAPE_FILTER}=test:has:fast', link)
+        self.assertIn(f'{ESCAPE_SORT}=test:asc', link)
+        self.assertIn(f'{PAGE}=2', link)
+
+    def test_paging_a_filtered_set_counts_the_filtered_total(self) -> None:
+        self._convict_many(5)
+        with self._paged(2):
+            page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:f1')
+        self.assertIn('all 1 shown', page)
+        self.assertNotIn('Page 1 of', page)
 
 
 class TestVocabularyLegend(WebTest):
