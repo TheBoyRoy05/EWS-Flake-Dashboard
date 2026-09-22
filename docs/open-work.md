@@ -42,3 +42,8 @@ The queue picker was rebuilt from a flat set of platform chips into a three-leve
 ## Miscellaneous
 
 A UX review pass over the app found several smaller issues not yet addressed: a freshness-staleness banner that is dismissed by default rather than shown only when stale; provisional verdicts counted inside sets presented as decided; no remainder indicator when the escapes drilldown's cap truncates a list; page navigation that drops the current suite/builder selection when following certain links; a trend-chart day-bucketing note whose referenced constant no longer exists under that name in the code, worth re-deriving before trusting it; and a couple of small chart/label inconsistencies (an "all states" badge duplicating a separate "clear" control, gridline labels off by one step). None of these has been re-verified individually against the current templates; treat this paragraph as a punch list to re-derive from the running app rather than as confirmed findings.
+
+## Developer setup
+
+- **`scripts/setup.sh` covers a fresh database only; it has no live-database path, by design.** It installs dependencies, creates the database, runs the tests and does a first ingest, refusing to run if the target database already exists unless `--force`, and it only ever prints (never runs) the escape-detection command. Migrating an existing database still follows the backup-then-migrate recipe in the handoff by hand — the migration scripts under `scripts/migrate_*.py` are not wired into `setup.sh`, and should stay that way, because auto-migrating a live database from a setup script is exactly the mistake the fresh-only guard exists to prevent.
+

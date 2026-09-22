@@ -16,6 +16,18 @@ Tests holds the convicted-test table: one row per test, with every flake type it
 
 ## Running it
 
+For a fresh database, `scripts/setup.sh` does the install, database creation, test
+run and first ingest in one command, and refuses to touch a database that already
+exists so it cannot clobber a live one:
+
+```
+scripts/setup.sh                            # fresh setup: install, create, test, ingest
+scripts/setup.sh --checkout /path/to/WebKit # also print the escape-detection command (see below)
+python3 -m flask --app ews_dashboard.web.app:create_app run
+```
+
+Or run the same steps by hand:
+
 ```
 pip3 install -r requirements.txt
 python3 -m ews_dashboard.db                 # create the database
@@ -28,6 +40,20 @@ nothing to configure and nothing to leak. `EWS_DASHBOARD_DATABASE` overrides whe
 lives.
 
 `scripts/refresh.py` is the only thing that touches the network. It defaults to the widest window the pages offer, 90 days, so a verdict exists for everything a reader can ask to see; `--days` narrows it. The web app reads the database and nothing else, which is why a page cannot hang on a slow results.webkit.org query and why every page shows how old its numbers are.
+
+The escapes page ("What main said afterwards", below) stays empty until escape
+detection runs, and escape detection is skipped on every refresh unless
+`EWS_DASHBOARD_CHECKOUT` points at a WebKit checkout — the plain setup above does
+not enable it. There is no default checkout on purpose: a wrong path reads as
+thousands of pull requests that never landed. The pass is also slow (serial
+`results.webkit.org` queries, on the order of 20 minutes) and should be run
+detached with a log file, never inline. `scripts/setup.sh --checkout PATH` prints
+the exact command for it rather than running it:
+
+```
+EWS_DASHBOARD_CHECKOUT=/path/to/WebKit \
+  nohup python3 -u -m scripts.refresh --skip-ingest --days 90 > escape-refresh.log 2>&1 &
+```
 
 ## How the metric is defined
 
