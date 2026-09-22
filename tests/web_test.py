@@ -1860,13 +1860,17 @@ class TestEscapesOrder(EscapeRows):
         self.assertEqual(set(self.SORTED_HEADER.findall(self.page('/escapes'))),
                          {'Escape strength'})
 
-    def test_the_order_is_named_in_words_as_well_as_in_an_arrow(self) -> None:
-        """A reader can order this table by a column it does not print, and strength renders as a
-        dash on every category but ESCAPED, so an arrow alone can leave the order invisible."""
+    def test_the_order_is_named_in_words_only_where_the_arrow_cannot_say_it(self) -> None:
+        """Beside a sorted column that prints its own arrow the sentence repeats what is already a
+        line below it. It is kept for the orders an arrow cannot show: a column this table does not
+        print, strength on a category that renders it as a dash, and a narrowed table."""
         self._three_escapes()
-        self.assertIn('Ordered by Escape strength (%), highest first.', self.page('/escapes'))
-        self.assertIn('Ordered by Test, lowest first.',
-                      self.page(f'/escapes?{ESCAPE_SORT}=test:asc'))
+        self.assertNotIn('Ordered by', self.page('/escapes'))
+        self.assertNotIn('Ordered by', self.page(f'/escapes?{ESCAPE_SORT}=test:asc'))
+        self.assertIn('Ordered by Runs after landing, highest first.',
+                      self.page(f'/escapes?{ESCAPE_SORT}=runs_after:desc'))
+        self.assertIn('Ordered by Escape strength (%), highest first, filtered by',
+                      self.page(f'/escapes?{ESCAPE_FILTER}=test:has:fast'))
 
     def test_a_sort_argument_reorders_the_listed_convictions(self) -> None:
         self._three_escapes()
