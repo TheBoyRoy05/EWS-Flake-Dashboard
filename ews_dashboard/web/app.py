@@ -730,7 +730,7 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
         subcategories=subcategories,
         listed=listed,
         verdict_shown=verdict_shown,
-        sentence=escapes.sentence,
+        reason=escapes.reason,
         verdict_descriptions=escapes.VERDICT_DESCRIPTIONS,
         categories=escapes.CATEGORIES,
         window_days=config.ESCAPE_WINDOW_DAYS,

@@ -1411,12 +1411,15 @@ class TestEscapes(WebTest):
         self.assertIn('1 not looked for', page)
 
     def test_an_escape_is_listed_with_the_runs_behind_it(self) -> None:
+        """Three count pairs, not a sentence about them: the baseline, the counts after the landing,
+        and — where a currency check has run — the counts main has run lately."""
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=72555,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
         page = self.page('/escapes')
         self.assertIn('fast/a.html', page)
-        self.assertIn('3 of 3', page)
+        self.assertIn('<span class="evidence">0/4</span>', page)
+        self.assertIn('<span class="evidence">3/3</span>', page)
         self.assertIn('pull/72555', page)
 
     def test_the_two_computed_columns_show_a_header_and_a_value(self) -> None:
@@ -1469,7 +1472,7 @@ class TestEscapes(WebTest):
         page = self.page('/escapes')
         self.assertIn('Landing time unknown', page)
         self.assertIn('fast/a.html', page)
-        self.assertIn('3 of 3', page)
+        self.assertIn('<span class="evidence">3/3</span>', page)
 
     def test_the_rate_is_over_what_main_answered_and_not_over_every_conviction(self) -> None:
         """A conviction main ran nothing about belongs in no denominator: counting it would report
@@ -1506,13 +1509,15 @@ class TestEscapes(WebTest):
         self.assertIn('No conviction in this window escaped', page)
 
     def test_a_verdict_drilled_into_lists_its_convictions_and_why(self) -> None:
+        """A category main answered nothing about prints an em dash in both numeric cells, so its rows
+        keep a reason — a phrase, capped at `escapes.REASON_WORDS` words, not the paragraph that used
+        to stand here."""
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=72555,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.CONTAINED, failed_after=0,
                             runs_after=5)
         page = self.page(f'/escapes?verdict={escapes.CONTAINED}')
-        self.assertIn('Main ran it <strong>5 times</strong> after the landing and never failed it.',
-                      page)
+        self.assertIn('Never failed it in 5 runs', page)
         self.assertIn('pull/72555', page)
 
     def test_a_verdict_that_is_not_a_verdict_is_ignored_rather_than_refused(self) -> None:
@@ -1661,14 +1666,16 @@ class TestEscapes(WebTest):
 
     def test_the_placeholder_does_not_claim_nothing_escaped_on_few_failures(self) -> None:
         """The headline counts it, so a pane saying nothing escaped would argue with the number
-        above it."""
+        above it. What it is is said by the split under the bucket rather than by a clause on the row:
+        one conviction, unproven."""
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED, failed_after=1,
                             runs_after=96)
         page = self.page('/escapes')
         self.assertNotIn('No conviction in this window escaped:', page)
-        self.assertIn('The landing did not measurably worsen it.', page)
+        self.assertRegex(page, r'UNPROVEN</span><span class="tally">1</span>')
+        self.assertRegex(page, r'STRONG</span></span><span class="tally">0</span>')
 
     def test_the_significance_split_under_the_escape_bucket_adds_up_to_it(self) -> None:
         strong = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
@@ -1678,18 +1685,22 @@ class TestEscapes(WebTest):
         self._stored_escape(strong, 'fast/a.html', escapes.ESCAPED)
         self._stored_escape(unproven, 'fast/b.html', escapes.ESCAPED, failed_after=1, runs_after=96)
         page = self.page('/escapes')
-        self.assertRegex(page, r'strongly escaped</span></span><span class="tally">1</span>')
-        self.assertRegex(page, r'unproven</span><span class="tally">1</span>')
+        self.assertRegex(page, r'STRONG</span></span><span class="tally">1</span>')
+        self.assertRegex(page, r'UNPROVEN</span><span class="tally">1</span>')
 
     def test_the_strong_line_carries_the_bucket_s_own_state_pill_for_emphasis(self) -> None:
         """It is the number this page exists to surface, so it is not one more grey row: it reuses the
-        same `state` pill the ESCAPED entry above it wears, and the unproven line stays plain."""
+        same `state` pill the ESCAPED entry above it wears, and the unproven line stays plain. Both
+        read as the uppercase constants the other pills on this page are, so the split does not look
+        like prose that wandered into a badge."""
         strong = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                   pr_title='One')
         self._stored_escape(strong, 'fast/a.html', escapes.ESCAPED)
         page = self.page('/escapes')
-        self.assertIn(f'<span class="state state-{escapes.ESCAPED}">strongly escaped</span>', page)
-        self.assertIn('<span class="label">unproven</span>', page)
+        self.assertIn(f'<span class="state state-{escapes.ESCAPED}">STRONG</span>', page)
+        self.assertIn('<span class="label">UNPROVEN</span>', page)
+        self.assertNotIn('strongly escaped', page)
+        self.assertNotIn('>unproven<', page)
 
     def test_the_strong_label_says_it_no_longer_means_a_share_of_runs(self) -> None:
         """The word is reassigned by this change, so a reader who knows the old 50%-of-runs meaning
@@ -1698,7 +1709,7 @@ class TestEscapes(WebTest):
                                   pr_title='One')
         self._stored_escape(strong, 'fast/a.html', escapes.ESCAPED)
         page = self.page('/escapes')
-        self.assertIn('Strong no longer means a share of the runs after the landing failing.', page)
+        self.assertIn('STRONG no longer means a share of the runs after the landing failing.', page)
         self.assertIn('not the old 50% run share', page)
         self.assertIn('alpha 0.10', page)
 
@@ -1737,7 +1748,10 @@ class TestEscapes(WebTest):
                                r'<span class="tally">4</span>')
         self.assertEqual(sum(counts.values()), 4)
 
-    def test_a_listed_escape_says_what_main_is_doing_with_it_now(self) -> None:
+    def test_a_listed_escape_says_what_main_is_doing_with_it_now_in_the_damage_cell(self) -> None:
+        """The Current damage cell is where this is now said, in the recent pair: failures over runs
+        for a test main is still failing, and zero over runs for one it has stopped failing. The prose
+        that said the same thing in English repeated both figures in the same row."""
         still = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                  pr_title='One')
         recovered = self.store_build(2, flaky={'fast/b.html': config.CLEAN_TREE}, pr_id=2,
@@ -1748,30 +1762,37 @@ class TestEscapes(WebTest):
         self._stored_escape(recovered, 'fast/b.html', escapes.ESCAPED, recent_runs=44,
                             recent_failed=0, recent_checked_at=now)
         page = self.page('/escapes')
-        self.assertIn(f'Main is still failing it, <strong>31 of 40</strong> runs in the last '
-                      f'{config.CURRENCY_DAYS} days.', page)
-        self.assertIn(f'Main has stopped failing it: none of its <strong>44 runs</strong> in the '
-                      f'last {config.CURRENCY_DAYS} days did.', page)
+        self.assertIn('77.5%<span class="evidence">31/40</span>', page)
+        self.assertIn('0%<span class="evidence">0/44</span>', page)
+        self.assertNotIn('Main is still failing it', page)
+        self.assertNotIn('Main has stopped failing it', page)
 
-    def test_a_listed_escape_main_has_not_run_lately_says_the_answer_is_unmeasured(self) -> None:
+    def test_a_listed_escape_main_has_not_run_lately_shows_no_damage_and_is_counted_as_such(self) \
+            -> None:
+        """Main having run it no times is no answer rather than a recovery, so the cell is blank and
+        the split beside the table is where that row is counted. The legend is what says a blank is no
+        answer and not a zero."""
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED, recent_runs=0,
                             recent_failed=0, recent_checked_at=int(time.time()))
         page = self.page('/escapes')
-        self.assertIn(f'Main has not run it in the last {config.CURRENCY_DAYS} days, so whether the '
-                      'failure is still there is unmeasured.', page)
-        self.assertNotIn('Main has stopped failing it', page)
+        self.assertIn(formatting.MISSING, page)
+        self.assertNotIn('0%<span class="evidence">0/0</span>', page)
+        self.assertEqual(self.currency_counts(page)['has not run it lately'], 1)
+        self.assertIn('Blank is no answer, not zero', page)
 
     def test_an_unchecked_escape_claims_nothing_about_the_last_week(self) -> None:
+        """Nothing has asked main about it, so the damage cell is blank and the row still carries the
+        two count pairs the verdict was decided on."""
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
         page = self.page('/escapes')
-        self.assertIn('Main failed it <strong>3 of 3</strong>', page)
-        self.assertNotIn('Main is still failing it', page)
-        self.assertNotIn('Main has stopped failing it', page)
-        self.assertNotIn('Main has not run it', page)
+        self.assertIn('<span class="evidence">0/4</span>', page)
+        self.assertIn('<span class="evidence">3/3</span>', page)
+        self.assertIn(formatting.MISSING, page)
+        self.assertEqual(self.currency_counts(page)['not checked yet'], 1)
 
     def test_no_split_is_shown_where_nothing_escaped(self) -> None:
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
@@ -1779,14 +1800,18 @@ class TestEscapes(WebTest):
         self._stored_escape(build_id, 'fast/a.html', escapes.CONTAINED, failed_after=0)
         self.assertNotIn('<div class="subcategories">', self.page('/escapes'))
 
-    def test_the_counts_behind_a_verdict_are_emphasised_where_a_reader_looks_for_them(self) -> None:
+    def test_the_counts_behind_a_verdict_are_printed_as_pairs_and_not_argued_about(self) -> None:
+        """The already-failing half of the bucket reads as its own two pairs — the baseline and the
+        counts after the landing — and draws no conclusion from them, since one failure in a long clean
+        baseline is what puts a row here."""
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.FAILS_ON_MAIN, failed_after=7,
                             runs_after=58)
         page = self.page(f'/escapes?verdict={escapes.FAILS_ON_MAIN}')
-        self.assertIn('<strong>7 of 58</strong>', page)
-        self.assertIn('before it.', page)
+        self.assertIn('<span class="evidence">0/4</span>', page)
+        self.assertIn('<span class="evidence">7/58</span>', page)
+        self.assertNotIn('before it.', page)
         self.assertNotIn('not this change', page)
 
     def test_the_detail_pane_narrows_to_the_chosen_queue(self) -> None:
@@ -1831,8 +1856,10 @@ class TestEscapes(WebTest):
         self.assertNotIn('<details class="section legend-pane" open>', page)
 
     def test_the_compressed_blocks_keep_every_disclosure_they_are_there_for(self) -> None:
-        """The legend and the caveats were cut hard, and these are the claims that may not be cut with
-        them: each is a thing a reader would otherwise get wrong about a figure on the page."""
+        """The legend and the caveats are now one collapsed block, and these are the claims that may
+        not be cut with the words: each is a thing a reader would otherwise get wrong about a figure on
+        the page. Some wording is shorter than the two blocks used to carry — the count pairs the old
+        legend described in prose are printed in the row itself — but no claim is gone."""
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
@@ -1841,20 +1868,33 @@ class TestEscapes(WebTest):
                 'lower bound',
                 'alpha 0.10',
                 'not the rate',
-                'the count pairs either side of the landing',
+                'failures of runs in the',
                 'no rise shown, not no failures',
                 'not the old 50% run share',
                 'Blank is no answer, not zero',
                 'nobody asked, or main ran it no times',
                 'recent_runs is a floor',
-                'limit is per response group',
+                'per-response-group limit',
                 'not clamped to the landing',
                 'only landings pinned from a pull request title',
-                'only tests a bot runs on main in the same configuration',
+                'only same-configuration runs',
                 'Undecided convictions are counted above, not dropped',
                 'not a regression count',
         ):
             self.assertIn(disclosure, page, disclosure)
+
+    def test_the_definitions_and_the_caveats_are_one_block_and_not_two(self) -> None:
+        """Two disclosures at the foot of the page were 188 words behind two summaries, and a reader
+        opens both asking the same question. The escapes page now has one, and the landing page's own
+        methodology block is untouched."""
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
+        page = self.page('/escapes')
+        self.assertNotIn('caveats-disclosure', page)
+        self.assertEqual(page.count('<details class="section legend-pane">'), 1)
+        self.assertIn('An escape is a test main failed after the landing', page)
+        self.assertIn('caveats-disclosure', self.page('/'))
 
 
 class EscapeRows(WebTest):
@@ -2343,34 +2383,41 @@ class TestVocabularyLegend(WebTest):
         self.assertIn(str(config.MAX_CLASSIFIABLE_SURFACED_TESTS),
                      false_positive.REASON_DESCRIPTIONS[false_positive.TOO_MANY_SURFACED])
 
-    def test_the_escape_verdict_glosses_name_the_configured_window_and_alpha(self) -> None:
+    def test_the_escape_verdict_glosses_name_the_configured_window(self) -> None:
         for verdict in (escapes.ESCAPED, escapes.FAILS_ON_MAIN, escapes.CONTAINED, escapes.NO_RUNS,
                        escapes.NO_BASELINE):
             self.assertIn(f'{config.ESCAPE_WINDOW_DAYS} days',
                          escapes.VERDICT_DESCRIPTIONS[verdict])
-        self.assertIn(f'alpha {config.ESCAPE_SIGNIFICANCE_ALPHA:.2f}',
-                      escapes.VERDICT_DESCRIPTIONS[escapes.ESCAPED])
         self.assertNotIn('strong escape needs',
+                         escapes.VERDICT_DESCRIPTIONS[escapes.ESCAPED])
+
+    def test_the_page_names_the_configured_alpha_where_the_split_is_read(self) -> None:
+        """The ESCAPED gloss used to carry this too, which made it the heaviest block of prose on the
+        page for a figure the legend and the split's own tooltip already name. Both interpolate the
+        setting, so neither can drift from it."""
+        self.assertIn(f'alpha {config.ESCAPE_SIGNIFICANCE_ALPHA:.2f}', self.page('/escapes'))
+        self.assertNotIn(f'alpha {config.ESCAPE_SIGNIFICANCE_ALPHA:.2f}',
                          escapes.VERDICT_DESCRIPTIONS[escapes.ESCAPED])
 
 
 class TestMethodologyDisclosure(WebTest):
     """The methodology prose went unread sitting open at the bottom of a page, so it is collapsed
-    behind a details, which the browser opens without the JavaScript this app does not ship."""
+    behind a details, which the browser opens without the JavaScript this app does not ship. The
+    escapes page's own disclosure is the legend it was folded into, since definitions and caveats
+    answer the same question and two collapsed blocks at one page's foot were read as furniture."""
 
-    DISCLOSURE = '<details class="caveats-disclosure">'
-
-    def assert_collapsed(self, path: str, prose: str) -> None:
+    def assert_collapsed(self, path: str, marker: str, prose: str) -> None:
         page = self.page(path)
-        self.assertIn(self.DISCLOSURE, page)
-        self.assertNotIn('caveats-disclosure" open', page)
+        self.assertIn(marker, page)
+        self.assertNotIn(marker.replace('>', ' open>'), page)
         self.assertIn(prose, page)
 
     def test_the_landing_methodology_is_present_and_collapsed(self) -> None:
-        self.assert_collapsed('/', 'every rate here is a floor on blame noise')
+        self.assert_collapsed('/', '<details class="caveats-disclosure">',
+                              'every rate here is a floor on blame noise')
 
     def test_the_escape_methodology_is_present_and_collapsed(self) -> None:
-        self.assert_collapsed('/escapes',
+        self.assert_collapsed('/escapes', '<details class="section legend-pane">',
                               'An escape is a test main failed after the landing')
 
 

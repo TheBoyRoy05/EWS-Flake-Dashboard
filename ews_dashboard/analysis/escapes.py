@@ -147,16 +147,14 @@ BASELINE_FAILING = 'baseline_failing'
 UNDECIDED_VERDICTS = (NO_RUNS, NO_BASELINE, TREE_DIVERGED)
 
 VERDICT_DESCRIPTIONS = {
+    # Printed above the listing and again as the category pane's tooltip, so it says what the bucket
+    # is and stops. The grounds for folding the two stored verdicts into it live on the split's own
+    # tooltip, and what STRONG means lives on that split's tooltip and in the legend; repeating either
+    # here made this the heaviest block of prose on a page whose complaint was its word count.
     ESCAPED: f'Main failed this in the {config.ESCAPE_WINDOW_DAYS} days after the landing, so the '
-            'conviction excused a failure main went on to have. Whether main had also failed it '
-            'before the landing is the split under this bucket, not a bucket of its own: one '
-            'failure in a long clean baseline was enough to separate the two, and it separated '
-            'them by nothing a reader is looking for. Whether the landing measurably worsened the '
-            'test is the other split: strong means the bounded rate increase either side of it '
-            'clears zero at alpha '
-            f'{config.ESCAPE_SIGNIFICANCE_ALPHA:.2f}, and no longer means a share of the runs after '
-            f'the landing failing. The {config.ESCAPE_WINDOW_DAYS} days either side are what the '
-            'counts were taken over.',
+            'conviction excused a failure main went on to have. Two splits sit under this bucket '
+            'rather than beside it: whether main had also failed it before the landing, and whether '
+            'the landing measurably worsened it.',
     FAILS_ON_MAIN: f'Main was already failing this in the {config.ESCAPE_WINDOW_DAYS} days before '
                    'the change landed, and failed it after the landing too. Stored apart from '
                    'ESCAPED and shown with it: this is the already-failing half of that bucket.',
@@ -1056,130 +1054,34 @@ def convictions(connection: sqlite3.Connection, since: int, until: int, verdicts
     return ConvictionPage(convictions=listed, total=total, limit=size, offset=offset)
 
 
-@dataclass(frozen=True)
-class Part:
-    """One run of a verdict's sentence, and whether a page should emphasise it.
+# How many words a reason may be. A row in the merged escape bucket answers "why" in three count
+# pairs — the baseline, the counts after the landing, and the counts main has run lately — and the
+# prose that used to say the same thing in English ran to 21 words a row and 4,359 down the column. A
+# category main answered nothing about has no pairs to print and an em dash alone does not say why, so
+# it gets a phrase instead, capped here so the column cannot grow back into prose.
+REASON_WORDS = 6
 
-    The counts are what a reader is looking for in the prose, and they carry a test name beside
-    them, so the emphasis travels as data and the template is what turns it into markup.
+
+def reason(conviction: Conviction) -> str:
+    """Why main answered nothing about this conviction, in `REASON_WORDS` words or fewer.
+
+    Empty for the merged escape bucket, whose rows say it in figures: the baseline pair, the rate
+    increase with its after pair, and the current damage with its recent pair. A phrase there would
+    restate a count printed in the same row.
+
+    Each phrase carries the one fact its category's two numeric cells cannot, since both print an em
+    dash for every row here: how many runs main did make (CONTAINED), that it made none after the
+    landing (NO_RUNS), that it made none before it (NO_BASELINE), and how far the pull request moved
+    from the version convicted (TREE_DIVERGED). The two shas the diverged prose used to name are
+    dropped rather than abbreviated: the Build and PR links in the same row reach both, and neither
+    fits the cap beside the counts that say how far apart they are.
     """
-
-    text: str
-    emphasis: bool = False
-
-
-def _emphasised(text: str) -> Part:
-    return Part(text, emphasis=True)
-
-
-def _diverged_sentence(conviction: Conviction) -> 'tuple[Part, ...]':
-    """What the heads say, with each piece dropped rather than rendered when it was never stored: a
-    build ingested before `github.head.sha` was recorded has no head to name, and a row with no
-    `landed_at` has no sha to name it landed as."""
-    convicted = (f'Convicted on head {conviction.tested_sha[:8]}' if conviction.tested_sha
-                 else 'Convicted on a head this build did not record')
-    subject = f'PR {conviction.pr_id}' if conviction.pr_id is not None else 'the pull request'
-    landed = f' and landed as {conviction.newest_sha[:8]}' if conviction.newest_sha else ''
-    return (
-        Part(f'{convicted}, but {subject} was built '),
-        _emphasised(f'{conviction.builds} times'),
-        Part(' across '),
-        _emphasised(f'{conviction.heads} heads'),
-        Part(f'{landed}.'),
-    )
-
-
-def _currency_clause(conviction: Conviction) -> 'tuple[Part, ...]':
-    """What main is doing with the test now, or nothing at all when nobody has asked.
-
-    An unchecked escape gets no clause rather than a hedged one: a sentence that mentions the last
-    week at all implies main was asked about it.
-    """
-    state = conviction.currency
-    if state == STILL_FAILING:
-        return (
-            Part(' Main is still failing it, '),
-            _emphasised(f'{conviction.recent_failed} of {conviction.recent_runs}'),
-            Part(f' runs in the last {config.CURRENCY_DAYS} days.'),
-        )
-    if state == RECOVERED:
-        return (
-            Part(' Main has stopped failing it: none of its '),
-            _emphasised(f'{conviction.recent_runs} runs'),
-            Part(f' in the last {config.CURRENCY_DAYS} days did.'),
-        )
-    if state == NOT_RUN_LATELY:
-        return (
-            Part(f' Main has not run it in the last {config.CURRENCY_DAYS} days, so whether the '
-                 'failure is still there is unmeasured.'),
-        )
-    return ()
-
-
-def _significance_clause(conviction: Conviction) -> Part:
-    """Whether the landing measurably worsened the test, which is the split this bucket is read by.
-
-    One clause for both halves of the merged bucket, because it is the same question of both and the
-    counts either side are what answers it. A row the bound cannot be taken on says the question is
-    unanswerable rather than saying no: no row in this bucket reaches that, and silence there would
-    read as a landing shown to have changed nothing.
-    """
-    significance = conviction.significance
-    if significance == SIGNIFICANT:
-        return Part(' The landing measurably worsened it.')
-    if significance == NOT_SIGNIFICANT:
-        return Part(' The landing did not measurably worsen it.')
-    return Part(' Whether the landing worsened it cannot be measured from these runs.')
-
-
-def _escaped_sentence(conviction: Conviction) -> 'tuple[Part, ...]':
-    """The counts behind the escape, whether the landing worsened the test, and what main is doing with
-    it now."""
-    return (
-        Part('Main failed it '),
-        _emphasised(f'{conviction.failed_after} of {conviction.runs_after}'),
-        Part(' runs after the landing, having never failed it in the '),
-        _emphasised(str(conviction.runs_before)),
-        Part(' runs before.'),
-        _significance_clause(conviction),
-    ) + _currency_clause(conviction)
-
-
-def sentence(conviction: Conviction) -> 'tuple[Part, ...]':
-    """Why this conviction reached the verdict it did, in the counts main was asked for."""
-    if conviction.verdict == FAILS_ON_MAIN:
-        # The counts on both sides, and the one conclusion the counts do support. This row sits in the
-        # same bucket as an ESCAPED one now, and the old tail ("main's failure, not this change's")
-        # was the knife-edge reading the fold exists to stop making: one failure in a long clean
-        # baseline is not grounds for telling a reader whose failure it is. What the two count pairs
-        # do answer is whether the landing made the test measurably worse, so that is what is said.
-        return (
-            Part('Main failed it '),
-            _emphasised(f'{conviction.failed_after} of {conviction.runs_after}'),
-            Part(' runs '),
-            _emphasised('after'),
-            Part(' the landing, and '),
-            _emphasised(f'{conviction.failed_before} of {conviction.runs_before}'),
-            Part(' before it.'),
-            _significance_clause(conviction),
-        ) + _currency_clause(conviction)
     if conviction.verdict == CONTAINED:
-        return (
-            Part('Main ran it '),
-            _emphasised(f'{conviction.runs_after} times'),
-            Part(' after the landing and never failed it.'),
-        )
+        return f'Never failed it in {conviction.runs_after} runs'
     if conviction.verdict == NO_RUNS:
-        return (Part(f'No bot ran it on main in the {config.ESCAPE_WINDOW_DAYS} days after the '
-                     'landing, so there is nothing to compare against.'),)
+        return 'No runs after the landing'
     if conviction.verdict == NO_BASELINE:
-        return (
-            Part('Main failed it '),
-            _emphasised(f'{conviction.failed_after} of {conviction.runs_after}'),
-            Part(' runs after the landing, but nothing ran it in the '
-                 f'{config.ESCAPE_WINDOW_DAYS} days before, so a regression cannot be told from a '
-                 'failure main already had.'),
-        )
+        return f'Failed {conviction.failed_after} of {conviction.runs_after}, nothing before'
     if conviction.verdict == TREE_DIVERGED:
-        return _diverged_sentence(conviction)
-    return _escaped_sentence(conviction)
+        return f'Built {conviction.builds} times across {conviction.heads} heads'
+    return ''

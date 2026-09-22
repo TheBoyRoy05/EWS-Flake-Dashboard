@@ -541,7 +541,7 @@ code {
     color: var(--good);
 }
 
-.state-PARTIAL_FP, .state-no_history, .state-FAILS_ON_MAIN {
+.state-PARTIAL_FP, .state-no_history, .state-FAILS_ON_MAIN, .state-UNPROVEN {
     background: var(--warn-bg);
     border-color: rgba(227, 171, 99, 0.32);
     color: var(--warn);

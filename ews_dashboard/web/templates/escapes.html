@@ -119,8 +119,8 @@
            colour for the same claim. The other lines stay plain, which is what makes this one read as
            the answer and them as the detail behind it. #}
         <span class="split text tiny">and the rate increase is</span>
-        <span class="line text tiny" title="The rise after the landing is larger than the evidence could explain by chance, at alpha {{ '%.2f' | format(significance_alpha) }}. Strong no longer means a share of the runs after the landing failing."><span class="label"><span class="state {{ escaped_verdict | state_class }}">strongly escaped</span></span><span class="tally">{{ subcategories.significant | count }}</span></span>
-        <span class="line text tiny" title="The rise is not distinguishable from chance. Not the same as no failures: main did fail the test after the landing, and nobody has shown the landing raised the rate."><span class="label">unproven</span><span class="tally">{{ subcategories.not_significant | count }}</span></span>
+        <span class="line text tiny" title="The rise after the landing is larger than the evidence could explain by chance, at alpha {{ '%.2f' | format(significance_alpha) }}. STRONG no longer means a share of the runs after the landing failing."><span class="label"><span class="state {{ escaped_verdict | state_class }}">STRONG</span></span><span class="tally">{{ subcategories.significant | count }}</span></span>
+        <span class="line text tiny" title="The rise is not distinguishable from chance. Not the same as no failures: main did fail the test after the landing, and nobody has shown the landing raised the rate."><span class="label"><span class="state state-UNPROVEN">UNPROVEN</span></span><span class="tally">{{ subcategories.not_significant | count }}</span></span>
       </div>
       {% endif %}
       {% endfor %}
@@ -238,15 +238,21 @@
          no rate increase it was worse than furniture: it announced an order over a column of em
          dashes, which is a defect to fix rather than to narrate. Those categories now read by landing
          time and do not offer a rate-increase sort at all. #}
+      {# The fourth column is the baseline in the merged escape bucket and a reason everywhere else,
+         so it is headed by what it holds. In the bucket a row's answer is three count pairs — the
+         baseline here, the counts after the landing under Rate increase, the counts main has run
+         lately under Current damage — and the header names the one this column carries rather than
+         asking "Why" over a figure. The other categories print an em dash in both of those cells, so
+         their rows keep a reason, capped at `escapes.REASON_WORDS` words. #}
       <table class="table full-width convictions">
-        <thead><tr>{{ sort_header('test', 'Test') }}<th>Rule</th><th>Queue</th><th>Why</th>{{ sort_header('landed', 'Landed', 'when') }}<th>Links</th>{% if shows_increase %}{{ sort_header('increase', 'Rate increase', 'numeric') }}{% else %}<th class="numeric">Rate increase</th>{% endif %}{{ sort_header('damage', 'Current damage', 'numeric') }}</tr></thead>
+        <thead><tr>{{ sort_header('test', 'Test') }}<th>Rule</th><th>Queue</th>{% if shows_increase %}<th class="numeric" title="Failures of runs on main in the {{ window_days }} days before the landing.">Before</th>{% else %}<th>Why</th>{% endif %}{{ sort_header('landed', 'Landed', 'when') }}<th>Links</th>{% if shows_increase %}{{ sort_header('increase', 'Rate increase', 'numeric') }}{% else %}<th class="numeric">Rate increase</th>{% endif %}{{ sort_header('damage', 'Current damage', 'numeric') }}</tr></thead>
         <tbody>
           {% for conviction in listed.convictions %}
           <tr>
             <td><a href="{{ links.test_history(conviction.configuration, conviction.test_name) }}" target="_blank" rel="noopener">{{ conviction.test_name }}</a></td>
             <td class="text tiny">{{ conviction.rule }}</td>
             <td class="text tiny">{{ conviction.builder }}</td>
-            <td class="text tiny">{% for part in sentence(conviction) %}{% if part.emphasis %}<strong>{{ part.text }}</strong>{% else %}{{ part.text }}{% endif %}{% endfor %}</td>
+            <td class="{{ 'numeric ' if conviction.verdict in escape_verdicts }}text tiny">{% if conviction.verdict in escape_verdicts %}{% if conviction.runs_before %}<span class="evidence">{{ conviction.failed_before }}/{{ conviction.runs_before }}</span>{% else %}—{% endif %}{% else %}{{ reason(conviction) }}{% endif %}</td>
             <td class="when text tiny">{% if conviction.landed_at is none %}Landing time unknown{% else %}{{ conviction.landed_at | moment }}{% endif %}</td>
             <td class="text tiny links">
               <a href="{{ links.build(conviction.builder_id, conviction.build_number) }}" target="_blank" rel="noopener">Build</a>
@@ -274,43 +280,34 @@
   </div>
 </div>
 
-<div class="section">
-  <div class="content">
-    <details class="caveats-disclosure">
-      <summary>How an escape is decided, and what this page cannot see</summary>
-      <div class="caveats text tiny">
-        <ul>
-          <li>An escape is a test main failed after the landing.</li>
-          <li>A conviction count is not a regression count: one landed regression convicts again on every later pull request tripping the same test.</li>
-          <li>A floor: only landings pinned from a pull request title, only tests a bot runs on main in the same configuration, only the {{ window_days }} days either side.</li>
-          <li>Undecided convictions are counted above, not dropped.</li>
-        </ul>
-      </div>
-    </details>
-  </div>
-</div>
-
-{# Collapsed, like the caveats disclosure above it. It is reference material — what a figure means and
-   what it does not — rather than something to read on every visit, and 280 words held open at the foot
-   of the page were read as furniture instead of as the disclosures they are. #}
+{# One collapsed block for both jobs a reader opens it for: what a figure means, and what this page
+   cannot see. They were two disclosures at the foot of the page, and 188 words across two summaries
+   read as furniture the way 280 held open had. Collapsed, not `open`: reference material, not an
+   explainer on every visit. Every fact is said once and the count pairs the old legend described are
+   now printed in the row itself, so each bullet names what a figure is and stops. `tests/prose_budget_test.py`
+   fails if this block passes its word ceiling — cut copy to fix that, never raise the ceiling. #}
 <details class="section legend-pane">
-  <summary class="header"><span class="title">Legend</span></summary>
+  <summary class="header"><span class="title">Legend and caveats</span></summary>
   <div class="content">
     <div class="legend-group">
-      <div class="legend-group-title text tiny">Rate increase — how much worse the landing made the test</div>
+      <div class="legend-group-title text tiny">What an escape is</div>
       <ul class="text tiny">
-        <li>Inputs: the count pairs either side of the landing.</li>
-        <li>Newcombe square-and-add lower bound on two <a href="https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval#Wilson_score_interval" target="_blank" rel="noopener">Wilson intervals</a>, alpha {{ '%.2f' | format(significance_alpha) }} — not the rate.</li>
-        <li>Strong: bound above zero — a rise beyond chance, not the old 50% run share.</li>
-        <li>Unproven: bound zero or below — no rise shown, not no failures.</li>
+        <li>An escape is a test main failed after the landing.</li>
+        <li>A conviction count is not a regression count: one regression convicts again on later pull requests tripping it.</li>
+        <li>A floor: only landings pinned from a pull request title, only same-configuration runs, {{ window_days }} days either side.</li>
+        <li>Undecided convictions are counted above, not dropped.</li>
       </ul>
     </div>
     <div class="legend-group">
-      <div class="legend-group-title text tiny">Current damage — how often main fails it now</div>
+      <div class="legend-group-title text tiny">The three count pairs</div>
       <ul class="text tiny">
-        <li>Inputs: recent_failed of recent_runs, last {{ currency_days }} days.</li>
+        <li>Before: failures of runs in the {{ window_days }} days before.</li>
+        <li>Rate increase: Newcombe lower bound on two <a href="https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval#Wilson_score_interval" target="_blank" rel="noopener">Wilson intervals</a> at alpha {{ '%.2f' | format(significance_alpha) }}, not the rate.</li>
+        <li>STRONG: bound above zero, a rise beyond chance, not the old 50% run share.</li>
+        <li>UNPROVEN: at or below zero, no rise shown, not no failures.</li>
+        <li>Current damage: recent_failed of recent_runs, last {{ currency_days }} days.</li>
         <li>Blank is no answer, not zero: nobody asked, or main ran it no times.</li>
-        <li>recent_runs is a floor (limit is per response group); the window is not clamped to the landing.</li>
+        <li>recent_runs is a floor (a per-response-group limit), not clamped to the landing.</li>
       </ul>
     </div>
   </div>

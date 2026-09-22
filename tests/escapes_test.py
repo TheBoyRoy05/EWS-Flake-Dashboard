@@ -814,143 +814,66 @@ def _conviction(verdict: str, **fields: object) -> escapes.Conviction:
     return escapes.Conviction(**values)
 
 
-def _prose(parts: 'tuple[escapes.Part, ...]') -> str:
-    return ''.join(part.text for part in parts)
+class TestReason(fixtures.DatabaseTest):
+    """The short phrase a row gets where main answered nothing, and the silence where a row answers in
+    figures instead."""
 
+    def test_the_merged_escape_bucket_gets_no_phrase_because_its_figures_say_it(self) -> None:
+        """Both halves of the bucket print three count pairs — the baseline, the counts after the
+        landing, and the counts main has run lately — so a phrase beside them would only restate a
+        number already in the row."""
+        for verdict in escapes.MERGED_ESCAPE_VERDICTS:
+            self.assertEqual(escapes.reason(_conviction(verdict)), '', verdict)
 
-def _emphasised(parts: 'tuple[escapes.Part, ...]') -> 'list[str]':
-    return [part.text for part in parts if part.emphasis]
+    def test_a_contained_verdict_says_main_never_failed_it_and_how_often_it_ran(self) -> None:
+        """Both numeric cells are em dashes on this row, so the run count the prose carried has
+        nowhere else to live."""
+        self.assertEqual(escapes.reason(_conviction(escapes.CONTAINED, failed_after=0)),
+                         'Never failed it in 6 runs')
 
+    def test_a_no_runs_verdict_says_nothing_ran_after_the_landing(self) -> None:
+        self.assertEqual(escapes.reason(_conviction(escapes.NO_RUNS, runs_after=0, failed_after=0)),
+                         'No runs after the landing')
 
-class TestSentence(fixtures.DatabaseTest):
-    """One sentence per verdict, so a count drilled into explains itself without a legend."""
+    def test_a_no_baseline_verdict_keeps_the_after_counts_and_says_nothing_ran_before(self) -> None:
+        self.assertEqual(escapes.reason(_conviction(escapes.NO_BASELINE, runs_before=0)),
+                         'Failed 2 of 6, nothing before')
 
-    def test_a_fails_on_main_verdict_reports_both_rates(self) -> None:
-        """The rate either side is where a reader now tells a flaky test from a broken one, so both
-        have to be in the sentence — and no conclusion may be drawn from them, since this row sits in
-        the same bucket as an ESCAPED one and one failure in a long clean baseline is what put it
-        here."""
-        prose = _prose(escapes.sentence(_conviction(escapes.FAILS_ON_MAIN, runs_before=88,
-                                                   failed_before=6, runs_after=99,
-                                                   failed_after=14)))
-        self.assertIn('failed it 14 of 99 runs after the landing, and 6 of 88 before it', prose)
-        self.assertNotIn('not this change', prose)
+    def test_a_diverged_verdict_says_how_far_the_pull_request_moved(self) -> None:
+        """The two shas the prose named are dropped rather than abbreviated: the row's Build and PR
+        links reach both, and these counts are what say how far apart they are."""
+        self.assertEqual(escapes.reason(_conviction(escapes.TREE_DIVERGED)),
+                         'Built 3 times across 2 heads')
 
-    def test_a_fails_on_main_verdict_reads_the_same_for_a_baseline_main_was_broken_on(self) -> None:
-        self.assertIn('failed it 90 of 96 runs after the landing, and 90 of 96 before it',
-                      _prose(escapes.sentence(_conviction(escapes.FAILS_ON_MAIN, runs_before=96,
-                                                          failed_before=90, runs_after=96,
-                                                          failed_after=90))))
+    def test_a_diverged_verdict_with_no_head_recorded_reads_the_same(self) -> None:
+        """No sha is named, so the branch the prose needed for a build ingested before
+        `github.head.sha` was recorded is gone rather than special-cased."""
+        self.assertEqual(escapes.reason(_conviction(escapes.TREE_DIVERGED, tested_sha=None,
+                                                   newest_sha=None, pr_id=None)),
+                         'Built 3 times across 2 heads')
 
-    def test_a_contained_verdict_says_main_never_failed_it(self) -> None:
-        self.assertIn('ran it 6 times after the landing and never failed it',
-                      _prose(escapes.sentence(_conviction(escapes.CONTAINED, failed_after=0))))
-
-    def test_a_no_runs_verdict_says_nothing_ran_it(self) -> None:
-        self.assertIn(f'No bot ran it on main in the {config.ESCAPE_WINDOW_DAYS} days',
-                      _prose(escapes.sentence(_conviction(escapes.NO_RUNS, runs_after=0,
-                                                          failed_after=0))))
-
-    def test_a_no_baseline_verdict_says_nothing_ran_before_it(self) -> None:
-        self.assertIn(f'nothing ran it in the {config.ESCAPE_WINDOW_DAYS} days before',
-                      _prose(escapes.sentence(_conviction(escapes.NO_BASELINE, runs_before=0))))
-
-    def test_a_diverged_verdict_names_both_heads_and_how_many_there_were(self) -> None:
-        sentence = _prose(escapes.sentence(_conviction(escapes.TREE_DIVERGED)))
-        self.assertIn(f'Convicted on head {"a" * 8}', sentence)
-        self.assertIn(f'PR {PULL_REQUEST} was built 3 times across 2 heads', sentence)
-        self.assertIn(f'landed as {"b" * 8}', sentence)
-
-    def test_an_escaped_verdict_says_main_had_never_failed_it_before(self) -> None:
-        self.assertIn('failed it 4 of 6 runs after the landing, having never failed it '
-                      'in the 4 runs before.',
-                      _prose(escapes.sentence(_conviction(escapes.ESCAPED, failed_after=4))))
-
-    def test_an_escaped_verdict_says_whether_the_landing_measurably_worsened_it(self) -> None:
-        """The clause that replaced the share-of-runs one, which said nothing about the baseline the
-        verdict itself was decided on."""
-        self.assertIn('The landing measurably worsened it.',
-                      _prose(escapes.sentence(_conviction(escapes.ESCAPED, runs_before=94,
-                                                          failed_before=0, runs_after=127,
-                                                          failed_after=56))))
-
-    def test_an_escape_on_few_failures_says_the_worsening_was_not_measurable(self) -> None:
-        sentence = _prose(escapes.sentence(_conviction(escapes.ESCAPED, runs_before=152,
-                                                       failed_before=0, runs_after=96,
-                                                       failed_after=1)))
-        self.assertIn('failed it 1 of 96 runs after the landing, having never failed it in the '
-                      '152 runs before', sentence)
-        self.assertIn('The landing did not measurably worsen it.', sentence)
-        self.assertNotIn('a strong escape needs', sentence)
-
-    def test_an_escape_main_is_still_failing_says_so_with_the_recent_counts(self) -> None:
-        sentence = escapes.sentence(_conviction(escapes.ESCAPED, recent_runs=12, recent_failed=9,
-                                                recent_checked_at=fixtures.DEFAULT_BUILD_TIME))
-        self.assertIn(f'Main is still failing it, 9 of 12 runs in the last {config.CURRENCY_DAYS} '
-                      'days.', _prose(sentence))
-        self.assertIn('9 of 12', _emphasised(sentence))
-
-    def test_an_escape_main_has_stopped_failing_says_that_instead(self) -> None:
-        sentence = escapes.sentence(_conviction(escapes.ESCAPED, recent_runs=31, recent_failed=0,
-                                                recent_checked_at=fixtures.DEFAULT_BUILD_TIME))
-        self.assertIn('Main has stopped failing it: none of its 31 runs in the last '
-                      f'{config.CURRENCY_DAYS} days did.', _prose(sentence))
-        self.assertIn('31 runs', _emphasised(sentence))
-
-    def test_an_escape_main_has_not_run_lately_says_that_and_nothing_about_failures(self) -> None:
-        """The counts it would otherwise print are 0 of 0, which reads as a clean recent record while
-        being no record at all."""
-        sentence = escapes.sentence(_conviction(escapes.ESCAPED, recent_runs=0, recent_failed=0,
-                                                recent_checked_at=fixtures.DEFAULT_BUILD_TIME))
-        prose = _prose(sentence)
-        self.assertIn(f'Main has not run it in the last {config.CURRENCY_DAYS} days, so whether the '
-                      'failure is still there is unmeasured.', prose)
-        self.assertNotIn('stopped failing it', prose)
-        self.assertNotIn('0 runs', prose)
-
-    def test_an_escape_nothing_has_asked_about_claims_nothing_either_way(self) -> None:
-        """Saying main has stopped would be a recovery nobody measured, and saying it is still
-        failing would be a regression nobody measured."""
-        sentence = _prose(escapes.sentence(_conviction(escapes.ESCAPED)))
-        self.assertNotIn('still failing it', sentence)
-        self.assertNotIn('stopped failing it', sentence)
-        self.assertNotIn('has not run it', sentence)
-        self.assertNotIn(f'last {config.CURRENCY_DAYS} days', sentence)
-
-    def test_a_diverged_verdict_with_no_head_recorded_omits_it(self) -> None:
-        sentence = _prose(escapes.sentence(_conviction(escapes.TREE_DIVERGED, tested_sha=None,
-                                                       newest_sha=None, pr_id=None)))
-        self.assertNotIn('None', sentence)
-        self.assertIn('the pull request was built 3 times', sentence)
-
-    def test_a_sentence_carries_no_markup_of_its_own(self) -> None:
-        """It interpolates test names, so the page has to keep autoescaping it: the emphasis is
-        data and the template is what turns it into tags."""
+    def test_every_reason_fits_the_cap_the_column_is_budgeted_at(self) -> None:
+        """The cap is the point of the column: the prose it replaced ran to 21 words a row and 4,359
+        down the column, and a phrase free to grow grows back into prose.
+        `tests/prose_budget_test.py` holds the page itself to the same ceiling."""
         for verdict in escapes.VERDICTS:
-            for part in escapes.sentence(_conviction(verdict)):
-                self.assertIs(type(part.text), str)
-                self.assertNotIn('<', part.text)
+            self.assertLessEqual(len(escapes.reason(_conviction(verdict)).split()),
+                                 escapes.REASON_WORDS, verdict)
 
-    def test_every_verdict_that_reports_counts_emphasises_them(self) -> None:
-        """A page where one verdict bolds its numbers and the next does not reads as a bug."""
-        fails_on_main = _conviction(escapes.FAILS_ON_MAIN, runs_before=88, failed_before=6,
-                                    runs_after=99, failed_after=14)
-        self.assertEqual(_emphasised(escapes.sentence(fails_on_main)),
-                         ['14 of 99', 'after', '6 of 88'])
-        self.assertEqual(_emphasised(escapes.sentence(_conviction(escapes.ESCAPED))),
-                         ['2 of 6', '4'])
-        self.assertEqual(_emphasised(escapes.sentence(_conviction(escapes.CONTAINED,
-                                                                  failed_after=0))),
-                         ['6 times'])
-        self.assertEqual(_emphasised(escapes.sentence(_conviction(escapes.NO_BASELINE,
-                                                                  runs_before=0))),
-                         ['2 of 6'])
-        self.assertEqual(_emphasised(escapes.sentence(_conviction(escapes.TREE_DIVERGED))),
-                         ['3 times', '2 heads'])
+    def test_a_reason_carries_no_markup_of_its_own(self) -> None:
+        """It interpolates stored counts, so the page has to keep autoescaping it."""
+        for verdict in escapes.VERDICTS:
+            phrase = escapes.reason(_conviction(verdict))
+            self.assertIs(type(phrase), str)
+            self.assertNotIn('<', phrase)
 
-    def test_a_verdict_with_no_counts_to_report_emphasises_nothing(self) -> None:
-        self.assertEqual(_emphasised(escapes.sentence(_conviction(escapes.NO_RUNS, runs_after=0,
-                                                                  failed_after=0))), [])
+    def test_no_reason_mentions_a_figure_the_row_prints_beside_it(self) -> None:
+        """The whole restructure: the after pair and the recent pair have their own cells, so a phrase
+        repeating either is the duplication this column was replaced to stop."""
+        escape = _conviction(escapes.ESCAPED, runs_before=98, failed_before=0, runs_after=108,
+                             failed_after=7, recent_runs=259, recent_failed=0,
+                             recent_checked_at=fixtures.DEFAULT_BUILD_TIME)
+        self.assertEqual(escapes.reason(escape), '')
 
 
 class TestConvictions(fixtures.DatabaseTest):
