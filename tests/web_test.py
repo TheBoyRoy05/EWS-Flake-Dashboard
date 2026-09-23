@@ -2522,6 +2522,43 @@ class TestEscapesOrder(EscapeRows):
             self.assertIn(f'{ESCAPE_FILTER}=test:has:fast', link)
             self.assertIn(f'{ESCAPE_SORT}=test:asc', link)
 
+    def test_the_links_cell_puts_the_pull_request_above_the_build(self) -> None:
+        """A reader scanning this column is going to the change, not to the build that convicted it.
+        All three leave this host, so all three carry target and rel; the page-wide check below
+        asserts that invariant, and this one asserts the order it is in."""
+        self._three_escapes()
+        page = self.page('/escapes')
+        cell = re.search(r'<td class="text tiny links">(.*?)</td>', page, re.S)
+        self.assertIsNotNone(cell)
+        labels = re.findall(r'<a [^>]*>([^<]+)</a>', cell.group(1))
+        self.assertEqual(labels, ['PR', 'Build', 'History'])
+        for anchor in re.findall(r'<a [^>]*>', cell.group(1)):
+            self.assertIn('target="_blank"', anchor)
+            self.assertIn('rel="noopener"', anchor)
+
+    def test_a_conviction_with_no_pull_request_renders_no_pr_link_and_no_gap(self) -> None:
+        """The conditional emits nothing at all rather than an empty anchor, so the cell just starts
+        at Build."""
+        build_id = self.store_build(9, flaky={'fast/nopr.html': config.CLEAN_TREE})
+        with self.connection:
+            self.connection.execute('UPDATE build_verdicts SET pr_id = NULL WHERE build_id = ?',
+                                    (build_id,))
+            self.connection.execute(
+                '''INSERT INTO escape_verdicts (
+                    build_id, test_name, verdict, runs_before, failed_before, runs_after,
+                    failed_after, landed_at, window_ends_at, decided_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                (build_id, 'fast/nopr.html', escapes.ESCAPED, 4, 0, 8, 2,
+                 fixtures.DEFAULT_BUILD_TIME, int(time.time()), int(time.time())),
+            )
+        row = re.search(r'<tr>(?:(?!</tr>).)*fast/nopr\.html.*?</tr>', self.page('/escapes'), re.S)
+        self.assertIsNotNone(row, 'the pull-request-less conviction did not render')
+        cell = re.search(r'<td class="text tiny links">(.*?)</td>', row.group(0), re.S)
+        self.assertIsNotNone(cell)
+        self.assertEqual(re.findall(r'<a [^>]*>([^<]+)</a>', cell.group(1)), ['Build', 'History'])
+        self.assertNotIn('>PR</a>', cell.group(1))
+        self.assertNotRegex(cell.group(1), r'<a [^>]*>\s*</a>')
+
     def test_no_internal_control_opens_a_new_tab(self) -> None:
         """Commit e7e1a8e made the outbound links open in a new tab and left in-place navigation
         alone; the filter, sort and page controls added here are in-place navigation."""

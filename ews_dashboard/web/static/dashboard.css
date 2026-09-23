@@ -1386,6 +1386,15 @@ code {
     max-width: 60ch;
 }
 
+/* Queue was the one column with no ceiling, so the auto layout handed it the widest share of the
+   table's floor — 265px for a 35-character builder name, which left a long empty run between the name
+   and the right-aligned figure beside it. 24ch is the width the floor below already budgets for this
+   column: the longest builder name is 46 characters and breaks after a hyphen into two lines at that
+   width. A hyphenated name breaks on its own, so no `overflow-wrap` is needed here. */
+.table.convictions th:nth-child(3), .table.convictions td:nth-child(3) {
+    max-width: 24ch;
+}
+
 /* A test path and a whole sentence have no break point the browser would take on its own, so these two
    are allowed to break inside a word. Cells only: their headers are the single words `Test` and `Why`,
    which this would stack one letter per line (see `.table th`). */
@@ -1394,20 +1403,26 @@ code {
 }
 
 /* Measured from the width each column needs to stay READABLE, not from the width at which nothing
-   wraps: with eight columns, a test path and a full sentence among them, nothing-wraps is past 200ch
-   and would scroll on every screen there is. Test reads the 76-character path of a typical row in three
-   lines at 26ch; Why reads its longest 242-character sentence in seven at 36ch; Rule is nowrap and
-   `BetweenBuilds` is its longest name at 13 characters; Queue's longest value is a single 46-character
-   hyphenated builder name, which breaks after a hyphen into two lines at 24ch; Landed renders
-   `YYYY-MM-DD` over `HH:MM UTC` at 10; Links stacks `Build`/`PR`/`History`, the longest 7; and the last
-   two headers wrap to `ESCAPE`/`STRENGTH` and `CURRENT`/`DAMAGE`, whose longest words are 8 and 7
-   characters plus a sort arrow — each padded a few ch for the 6px/10px cell padding on both sides, then
-   summed: 26 + 16 + 24 + 36 + 14 + 10 + 13 + 12 = 151, rounded down to 150ch. Below that the pane
+   wraps: with eight columns and a test path among them, nothing-wraps is past 200ch and would scroll
+   on every screen there is. Test reads the 76-character path of a typical row in three lines at 26ch;
+   Rule is nowrap and `BetweenBuilds` is its longest name at 13 characters; Queue's longest value is a
+   single 46-character hyphenated builder name, which breaks after a hyphen into two lines at 24ch;
+   the fourth column is a count pair like `0/98` in the merged escape bucket and a phrase capped at
+   `escapes.REASON_WORDS` words elsewhere, whose longest reading is 31 characters over two lines at
+   18ch; Landed renders `YYYY-MM-DD` over `HH:MM UTC` at 10; Links stacks `PR`/`Build`/`History`, the
+   longest 7; and the last two headers wrap to `RATE`/`INCREASE` and `CURRENT`/`DAMAGE`, whose longest
+   words are 8 and 7 characters plus a sort arrow — each padded a few ch for the 6px/10px cell padding
+   on both sides, then summed: 26 + 16 + 24 + 18 + 14 + 13 + 13 + 12 = 136ch. Below that the pane
    scrolls rather than shrink the columns further. Without this floor the table fell all the way to its
-   min-content width, which cut `Current damage` off at the pane's right edge and drove rows past twenty
-   lines, one path segment and two words of the sentence at a time. */
+   min-content width, which cut `Current damage` off at the pane's right edge and drove rows past
+   twenty lines, one path segment at a time.
+
+   The fourth term was 36ch while that column held an English sentence, which made the floor 150ch and
+   handed every column a share of width its own content did not need — the empty run inside Queue that
+   read as wasted space came from there as much as from Queue having no ceiling of its own. The
+   sentence is gone (it is a count pair now), so the term went with it. */
 .table.convictions {
-    min-width: 150ch;
+    min-width: 136ch;
 }
 
 /* The pane body is the scroller the table overflows into, which is `.table-scroll`'s job for the
