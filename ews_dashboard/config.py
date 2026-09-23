@@ -85,8 +85,8 @@ FLAKINESS_RULES = (CLEAN_TREE, DIRTY_TREE, BETWEEN_BUILDS)
 # Thresholds are ResultsDatabase's in results_db.py: DirtyTree wants 2 pull requests and 2 authors.
 # BetweenBuilds wants 3 pull requests and 2 authors. Both windows are FLAKY_WINDOW_SECONDS, 3 days.
 RULE_DESCRIPTIONS = {
-    CLEAN_TREE: 'Recorded flaky with the change reverted, so the change cannot be the cause. One '
-               'such row convicts: this rule has no pull request or author threshold.',
+    CLEAN_TREE: 'Recorded flaky with the change reverted, so the change cannot be the cause. Wants '
+               '2 builds and no diversity of pull request, which is the weakest bar of the three.',
     DIRTY_TREE: 'Recorded flaky with a change applied, by at least 2 pull requests and at least 2 '
                'authors within 3 days.',
     BETWEEN_BUILDS: 'Recorded failing across at least 3 pull requests and at least 2 authors '

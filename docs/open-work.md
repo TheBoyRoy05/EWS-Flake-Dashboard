@@ -1,5 +1,17 @@
 # Open work
 
+- **Running WebKit's own EWS unit tests takes an undocumented dependency set.** `Tools/CISupport/ews-build`
+  carries no `requirements.txt` and no setup script, and three of its needs are not obvious: the
+  directory's hyphen makes `ews-build` an invalid module name, so `from . import send_email` only
+  resolves if the tree is reached under a symlink such as `ews_build`; `Tools/CISupport` itself must be
+  on `PYTHONPATH` for the `Shared` package; and `twisted.web.http.HTTPClient` was deprecated in Twisted
+  24.7.0, which `trial` raises as an error, so Twisted must be pinned below that. What worked here was a
+  venv holding `twisted==23.10.0`, `buildbot==4.2.1`, `buildbot-worker`, `mock` and `boto3`, run as
+  `python -m twisted.trial ews_build.steps_unittest`. That combination still reports 1280 errors of 722
+  tests before any local change, so it is a comparison baseline rather than a green suite — the buildbot
+  major version is probably wrong. Worth settling, because no local change to that file can be verified
+  green until it is.
+
 This document tracks known gaps and planned work in this repository. It is kept here, rather than in an issue tracker, so a reader looking at the code can see in one place what is not done yet, why it matters, and what would make an obvious-looking fix wrong.
 
 ## Escape counting correctness
