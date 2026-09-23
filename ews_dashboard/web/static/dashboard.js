@@ -178,6 +178,27 @@ function onFilterOperatorChanged(registry, operatorSelect) {
 }
 
 /**
+ * The remove control for a chip this file just built, which is the same named submit the server
+ * renders on a row that is not in the query yet: no clause exists to subtract from a URL, so the
+ * press goes to the server carrying the row's index and the form comes back without that row.
+ *
+ * Built here rather than left out because a row added client-side is precisely the one a reader wants
+ * to drop — they added it by mistake, or changed their mind before applying.
+ */
+function buildRemoveControl(registry, kind, index) {
+    var button = document.createElement('button');
+    var name = kind === 'filter' ? 'Remove filter ' : 'Remove sort ';
+    button.type = 'submit';
+    button.className = 'chip-remove';
+    button.name = kind === 'filter' ? registry.removeFilterArgument : registry.removeSortArgument;
+    button.value = String(index);
+    button.setAttribute('aria-label', name + (index + 1));
+    button.title = kind === 'filter' ? 'Remove this filter' : 'Remove this sort';
+    button.innerHTML = '&times;';
+    return button;
+}
+
+/**
  * Appends one more blank chip to a row, named for the next index in that row, instead of a round
  * trip through the "+ filter"/"+ sort" button's own submission.
  */
@@ -219,6 +240,7 @@ function addChip(row, registry, kind) {
         directionSelect.appendChild(buildOption('desc', 'Descending', false));
         chip.appendChild(directionSelect);
     }
+    chip.appendChild(buildRemoveControl(registry, kind, existing));
     row.appendChild(chip);
 }
 

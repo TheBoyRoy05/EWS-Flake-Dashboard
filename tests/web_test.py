@@ -1108,11 +1108,113 @@ class TestClauseRemoval(WebTest):
         self.assertEqual(arguments['suite'], ['layout-tests'])
         self.assertEqual(arguments['family'], ['Apple'])
 
-    def test_a_blank_chip_offers_no_delete(self) -> None:
-        """There is no committed clause behind it, so there is nothing for a delete to remove."""
+    def test_a_pending_chip_offers_a_named_submit_rather_than_a_link(self) -> None:
+        """A row a reader has only just added is in no URL, so there is nothing for a link to
+        subtract — and it is the row most likely to be dropped, since it was added by mistake or
+        thought better of. It takes the shape "+ filter" already takes instead."""
         section = self.convicted_section(self.page('/tests?add_filter=1'))
         self.assertEqual(self.chip_count(section, 'filter'), 1)
-        self.assertNotIn('chip-remove', section)
+        self.assertNotIn('<a class="chip-remove"', section)
+        self.assertIn('<button class="chip-remove" type="submit" name="remove_filter" value="0" '
+                      'aria-label="Remove filter 1"', section)
+
+    def test_every_chip_row_carries_exactly_one_remove_control(self) -> None:
+        """Applied or pending, and in every mixture of the two: a row without one is a row a reader
+        cannot drop, which is the whole of what this is for."""
+        for query, rows in ((f'/tests?{FILTER}=test:has:fast', 1),
+                            (f'/tests?add_filter=1', 1),
+                            (f'/tests?add_sort=1', 1),
+                            (f'/tests?{FILTER}=test:has:fast&add_filter=1', 2),
+                            (f'/tests?{FILTER}=test:has:fast&{FILTER}=convictions:ge:1'
+                             f'&{SORT}=test:asc&add_sort=1', 4)):
+            section = self.convicted_section(self.page(query))
+            controls = (section.count('<a class="chip-remove"')
+                        + section.count('<button class="chip-remove"'))
+            chips = self.chip_count(section, 'filter') + self.chip_count(section, 'sort')
+            self.assertEqual(chips, rows, query)
+            self.assertEqual(controls, rows, query)
+
+    def test_removing_a_pending_row_drops_it_and_keeps_the_applied_clause(self) -> None:
+        """The press carries the whole surface, so the assertion worth making is on where it lands:
+        the pending row is gone and the clause that was already applied is untouched."""
+        response = self.client.get(
+            f'/tests?days=30&{FILTER}=test:has:fast'
+            f'&{filters.filter_chip_argument(filters.TESTS, 0, "column")}=test'
+            f'&{filters.filter_chip_argument(filters.TESTS, 0, "op")}=has'
+            f'&{filters.filter_chip_argument(filters.TESTS, 0, "value")}=fast'
+            f'&{filters.filter_chip_argument(filters.TESTS, 1, "column")}=convictions'
+            f'&{filters.filter_chip_argument(filters.TESTS, 1, "op")}=ge'
+            f'&{filters.filter_chip_argument(filters.TESTS, 1, "value")}=9'
+            f'&remove_filter=1')
+        self.assertEqual(response.status_code, 302)
+        arguments = parse_qs(urlsplit(response.headers['Location']).query)
+        self.assertEqual(arguments[FILTER], ['test:has:fast'])
+        self.assertNotIn('remove_filter', arguments)
+
+    def test_removing_the_middle_pending_row_of_three_keeps_the_written_order(self) -> None:
+        chips = ('test:has:fast', 'convictions:ge:1', 'test:nohas:forms')
+        query = []
+        for index, clause in enumerate(chips):
+            column, operator, value = clause.split(':')
+            query.append(f'{filters.filter_chip_argument(filters.TESTS, index, "column")}={column}')
+            query.append(f'{filters.filter_chip_argument(filters.TESTS, index, "op")}={operator}')
+            query.append(f'{filters.filter_chip_argument(filters.TESTS, index, "value")}={value}')
+        response = self.client.get('/tests?' + '&'.join(query) + '&remove_filter=1')
+        self.assertEqual(response.status_code, 302)
+        arguments = parse_qs(urlsplit(response.headers['Location']).query)
+        self.assertEqual(arguments[FILTER], ['test:has:fast', 'test:nohas:forms'])
+
+    def test_removing_the_only_pending_row_lands_on_the_page_with_no_clause_at_all(self) -> None:
+        """The redirect matters most here: without it the reader stays parked on a URL naming a row
+        the page no longer shows."""
+        response = self.client.get(
+            f'/tests?days=30'
+            f'&{filters.filter_chip_argument(filters.TESTS, 0, "column")}=test'
+            f'&{filters.filter_chip_argument(filters.TESTS, 0, "op")}=has'
+            f'&{filters.filter_chip_argument(filters.TESTS, 0, "value")}=fast'
+            f'&add_filter=1&remove_filter=0')
+        self.assertEqual(response.status_code, 302)
+        arguments = parse_qs(urlsplit(response.headers['Location']).query)
+        self.assertEqual(arguments['days'], ['30'])
+        self.assertNotIn(FILTER, arguments)
+        self.assertNotIn('add_filter', arguments)
+        section = self.convicted_section(self.page(response.headers['Location']))
+        self.assertEqual(self.chip_count(section, 'filter'), 0)
+
+    def test_removing_a_pending_sort_row_keeps_every_filter(self) -> None:
+        response = self.client.get(
+            f'/tests?{filters.filter_chip_argument(filters.TESTS, 0, "column")}=test'
+            f'&{filters.filter_chip_argument(filters.TESTS, 0, "op")}=has'
+            f'&{filters.filter_chip_argument(filters.TESTS, 0, "value")}=fast'
+            f'&{filters.sort_chip_argument(filters.TESTS, 0, "column")}=convictions'
+            f'&{filters.sort_chip_argument(filters.TESTS, 0, "direction")}=desc'
+            f'&remove_sort=0')
+        self.assertEqual(response.status_code, 302)
+        arguments = parse_qs(urlsplit(response.headers['Location']).query)
+        self.assertEqual(arguments[FILTER], ['test:has:fast'])
+        self.assertNotIn(SORT, arguments)
+
+    def test_a_remove_press_naming_a_row_this_request_does_not_hold_is_ignored(self) -> None:
+        """Ignored rather than refused, like every other unreadable argument here: the press arrives
+        in a hand-edited URL as readily as from the button."""
+        for press in ('remove_filter=7', 'remove_filter=banana', 'remove_sort=-1'):
+            page = self.page(f'/tests?{FILTER}=test:has:fast&{press}')
+            self.assertIn('fast/forms/input.html', page, press)
+            self.assertNotIn('fast/dom/node.html'.replace('node', 'nonesuch'), page, press)
+
+    def test_the_remove_controls_are_indistinguishable_to_a_reader(self) -> None:
+        """Same class, same glyph, same accessible-name shape — only the mechanism differs, and the
+        reader must not be able to tell which row has which."""
+        page = self.page(f'/tests?{FILTER}=test:has:fast&add_filter=1')
+        link = re.search(r'<a class="chip-remove"[^>]*>(.*?)</a>', page)
+        button = re.search(r'<button class="chip-remove"[^>]*>(.*?)</button>', page)
+        self.assertIsNotNone(link)
+        self.assertIsNotNone(button)
+        self.assertEqual(link.group(1), button.group(1))
+        self.assertIn('aria-label="Remove filter 1"', link.group(0))
+        self.assertIn('aria-label="Remove filter 2"', button.group(0))
+        self.assertIn('title="Remove this filter"', link.group(0))
+        self.assertIn('title="Remove this filter"', button.group(0))
 
     def test_a_delete_is_a_plain_internal_link_with_no_script_and_no_new_window(self) -> None:
         """Removing the only clause leaves no clause argument at all, so this one is bare `/tests`
@@ -2683,6 +2785,36 @@ class TestEscapesClauseRemoval(EscapeRows):
         self.assertIn('Ignored 1 filter this page cannot read: nonesuch:has:x', page)
         arguments = parse_qs(urlsplit(self.removal_link(page, 'Remove filter 1')).query)
         self.assertNotIn(ESCAPE_FILTER, arguments)
+
+    def test_every_chip_row_carries_exactly_one_remove_control(self) -> None:
+        for query, rows in ((f'/escapes?{ESCAPE_FILTER}=test:has:fast', 1),
+                            ('/escapes?add_filter=1', 1),
+                            (f'/escapes?{ESCAPE_FILTER}=test:has:fast&add_filter=1', 2),
+                            (f'/escapes?{ESCAPE_FILTER}=test:has:fast'
+                             f'&{ESCAPE_FILTER}=runs_after:ge:1'
+                             f'&{ESCAPE_FILTER}=test:nohas:forms', 3)):
+            page = self.page(query)
+            controls = (page.count('<a class="chip-remove"')
+                        + page.count('<button class="chip-remove"'))
+            self.assertEqual(controls, rows, query)
+
+    def test_removing_a_pending_row_keeps_the_category_and_the_applied_clause(self) -> None:
+        response = self.client.get(
+            f'/escapes?days=30&verdict={escapes.ESCAPED}&{ESCAPE_FILTER}=test:has:fast'
+            f'&{filters.filter_chip_argument(filters.ESCAPES, 0, "column")}=test'
+            f'&{filters.filter_chip_argument(filters.ESCAPES, 0, "op")}=has'
+            f'&{filters.filter_chip_argument(filters.ESCAPES, 0, "value")}=fast'
+            f'&{filters.filter_chip_argument(filters.ESCAPES, 1, "column")}=runs_after'
+            f'&{filters.filter_chip_argument(filters.ESCAPES, 1, "op")}=ge'
+            f'&{filters.filter_chip_argument(filters.ESCAPES, 1, "value")}=99'
+            f'&remove_filter=1')
+        self.assertEqual(response.status_code, 302)
+        arguments = parse_qs(urlsplit(response.headers['Location']).query)
+        self.assertEqual(arguments[ESCAPE_FILTER], ['test:has:fast'])
+        self.assertEqual(arguments['verdict'], [escapes.ESCAPED])
+        # Two of the three fixtures are `fast/...`, so the kept clause lists both; the dropped
+        # pending clause would have demanded 99 runs after the landing and matched neither.
+        self.assertEqual(self.rows_rendered(self.page(response.headers['Location'])), 2)
 
 
 class TestVocabularyLegend(WebTest):

@@ -64,6 +64,14 @@ PAGE_ARGUMENT = 'page'
 ADD_FILTER_ARGUMENT = 'add_filter'
 ADD_SORT_ARGUMENT = 'add_sort'
 
+# And their opposites: the submit buttons that drop one chip row. A clause already in the query is
+# removed by a plain link subtracting it, but a row a reader has only just added is in no URL to
+# subtract from — so it takes the same shape "+ filter" already takes, a named submit, with the row's
+# own index as the value. Named per kind for the same reason the add buttons are: one press, one
+# meaning, and no guessing which row a bare "yes" was about.
+REMOVE_FILTER_ARGUMENT = 'remove_filter'
+REMOVE_SORT_ARGUMENT = 'remove_sort'
+
 # What a chip's kind renders its value control as, when its column has no fixed vocabulary. Anything
 # not listed here is free text, `filters.TEXT` included.
 CHIP_INPUT_TYPES = {filters.INTEGER: 'number', filters.TIMESTAMP: 'date'}
@@ -277,18 +285,19 @@ def _clause_removals(endpoint: str, table: filters.Table, asked: filters.Request
     with one index left out, which is what keeps removing the second of three from reordering the
     first and the third.
 
-    Everything else the request carries is kept, apart from three arguments a delete has no business
-    forwarding: the `+filter`/`+sort` presses, which asked the page that rendered for one more blank
-    chip, and `page`, since a narrower filter is a different set and row 201 of it is not row 201 of
-    this one. A clause that did not parse is not carried either — `asked.filter_clauses` holds only
-    what committed — which is the same judgment every other link on these pages makes.
+    Everything else the request carries is kept, apart from four arguments a delete has no business
+    forwarding: the `+filter`/`+sort` presses and the `remove` presses, each of which asked the page
+    that rendered to grow or shrink by one row, and `page`, since a narrower filter is a different set
+    and row 201 of it is not row 201 of this one. A clause that did not parse is not carried either —
+    `asked.filter_clauses` holds only what committed — which is the same judgment every other link on
+    these pages makes.
     """
     filter_argument = filters.filter_argument(table)
     sort_argument = filters.sort_argument(table)
     filter_stem = f'{filter_argument}{filters.CLAUSE_SEPARATOR}'
     sort_stem = f'{sort_argument}{filters.CLAUSE_SEPARATOR}'
     dropped = (filter_argument, sort_argument, ADD_FILTER_ARGUMENT, ADD_SORT_ARGUMENT,
-               PAGE_ARGUMENT)
+               REMOVE_FILTER_ARGUMENT, REMOVE_SORT_ARGUMENT, PAGE_ARGUMENT)
     kept = {name: values for name, values in _carried_arguments().items()
             if name not in dropped
             and not name.startswith(filter_stem) and not name.startswith(sort_stem)}
@@ -306,6 +315,46 @@ def _clause_removals(endpoint: str, table: filters.Table, asked: filters.Request
     )
 
 
+def _removed_chip(argument: str) -> Optional[int]:
+    """The chip index a remove press named, or None where this request holds no such press.
+
+    A value that is not a number is None rather than an error, the way every other argument on these
+    pages is read: the press arrives in a hand-edited URL as readily as from the button.
+    """
+    try:
+        return int(request.args[argument])
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _effective_arguments(table: filters.Table) -> object:
+    """This request's arguments with the fields of any chip a remove press named taken out.
+
+    The form submits every chip it holds, so a press of one row's × arrives as the whole surface plus
+    `remove_filter=<index>`. Dropping that row's three controls here — before `requested`,
+    `exploded_filter_specifications` or the redirect read anything — is what turns the press into "the
+    form without that row" without a second grammar for it: every remaining chip goes through exactly
+    the validation it went through before.
+
+    A press naming a row this request does not hold takes nothing out, which is the same
+    ignore-rather-than-refuse every unreadable argument here gets.
+    """
+    presses = ((REMOVE_FILTER_ARGUMENT, filters.filter_argument(table)),
+               (REMOVE_SORT_ARGUMENT, filters.sort_argument(table)))
+    stems = [f'{stem}{filters.CLAUSE_SEPARATOR}{index}{filters.CLAUSE_SEPARATOR}'
+             for argument, stem in presses
+             for index in (_removed_chip(argument),) if index is not None]
+    if not stems:
+        return request.args
+    kept = MultiDict()
+    for name in request.args.keys():
+        if any(name.startswith(stem) for stem in stems):
+            continue
+        for value in request.args.getlist(name):
+            kept.add(name, value)
+    return kept
+
+
 def _canonical_filter_arguments(table: filters.Table) -> object:
     """The canonical `f.`/`s.` arguments a request asked with, whether it spoke that grammar directly
     or exploded it into per-chip controls.
@@ -313,12 +362,13 @@ def _canonical_filter_arguments(table: filters.Table) -> object:
     A chip form's controls are always named the exploded way — `requested` never reads the exploded
     spelling, so a request that used it would otherwise look like one that asked for nothing at all.
     """
-    if not filters.has_exploded_arguments(request.args, table):
-        return request.args
+    arguments = _effective_arguments(table)
+    if not filters.has_exploded_arguments(arguments, table):
+        return arguments
     canonical = MultiDict()
-    for specification in filters.exploded_filter_specifications(request.args, table):
+    for specification in filters.exploded_filter_specifications(arguments, table):
         canonical.add(filters.filter_argument(table), specification)
-    for specification in filters.exploded_sort_specifications(request.args, table):
+    for specification in filters.exploded_sort_specifications(arguments, table):
         canonical.add(filters.sort_argument(table), specification)
     return canonical
 
@@ -343,19 +393,34 @@ def _redirect_target(table: filters.Table, endpoint: str) -> Optional[str]:
 
     Skipped for a `+filter`/`+sort` press: that button asks the page already open for one more blank
     chip, not a new address — the chip it adds has nothing to redirect to yet.
+
+    A remove press is the opposite and DOES redirect. The row it names is already gone from
+    `_effective_arguments`, so the canonical spelling built here is the surface without that row, and
+    landing on that address is also what drops a blank row a `+filter` press had asked for: the press
+    itself is not carried forward, so the page that answers renders only the chips its clauses need.
     """
-    if ADD_FILTER_ARGUMENT in request.args or ADD_SORT_ARGUMENT in request.args:
+    removing = (_removed_chip(REMOVE_FILTER_ARGUMENT) is not None
+                or _removed_chip(REMOVE_SORT_ARGUMENT) is not None)
+    if not removing and (ADD_FILTER_ARGUMENT in request.args
+                         or ADD_SORT_ARGUMENT in request.args):
         return None
-    if not filters.has_exploded_arguments(request.args, table):
+    arguments = _effective_arguments(table)
+    # Asked of the request rather than of `arguments` when removing: taking the last chip out leaves
+    # no exploded argument behind, and that request is exactly the one that most needs its redirect —
+    # without it the reader is left parked on a URL naming a row that is no longer on the page.
+    if not filters.has_exploded_arguments(request.args if removing else arguments, table):
         return None
     filter_stem = f'{filters.filter_argument(table)}{filters.CLAUSE_SEPARATOR}'
     sort_stem = f'{filters.sort_argument(table)}{filters.CLAUSE_SEPARATOR}'
+    dropped = (ADD_FILTER_ARGUMENT, ADD_SORT_ARGUMENT, REMOVE_FILTER_ARGUMENT,
+               REMOVE_SORT_ARGUMENT)
     kept = {name: values for name, values in _carried_arguments().items()
-           if not name.startswith(filter_stem) and not name.startswith(sort_stem)}
+           if name not in dropped
+           and not name.startswith(filter_stem) and not name.startswith(sort_stem)}
     kept[filters.filter_argument(table)] = list(
-        filters.exploded_filter_specifications(request.args, table))
+        filters.exploded_filter_specifications(arguments, table))
     kept[filters.sort_argument(table)] = list(
-        filters.exploded_sort_specifications(request.args, table))
+        filters.exploded_sort_specifications(arguments, table))
     return url_for(endpoint, **kept)
 
 
@@ -701,6 +766,8 @@ def _tests_context(open_connection: sqlite3.Connection, window: Window) -> dict:
                                sort_removals),
         add_filter_argument=ADD_FILTER_ARGUMENT,
         add_sort_argument=ADD_SORT_ARGUMENT,
+        remove_filter_argument=REMOVE_FILTER_ARGUMENT,
+        remove_sort_argument=REMOVE_SORT_ARGUMENT,
         filter_chip_argument=filters.filter_chip_argument,
         sort_chip_argument=filters.sort_chip_argument,
         all_operators=filters.ALL_OPERATORS,
@@ -846,6 +913,8 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
                                sort_removals),
         add_filter_argument=ADD_FILTER_ARGUMENT,
         add_sort_argument=ADD_SORT_ARGUMENT,
+        remove_filter_argument=REMOVE_FILTER_ARGUMENT,
+        remove_sort_argument=REMOVE_SORT_ARGUMENT,
         filter_chip_argument=filters.filter_chip_argument,
         sort_chip_argument=filters.sort_chip_argument,
         all_operators=filters.ALL_OPERATORS,

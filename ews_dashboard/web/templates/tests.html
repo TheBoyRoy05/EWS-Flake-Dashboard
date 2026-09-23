@@ -124,12 +124,14 @@
               {% else %}
               <input type="{{ chip.input_type }}" name="{{ filter_chip_argument(tests_table, chip.index, 'value') }}" class="chip-value" value="{{ chip.value }}" aria-label="Filter {{ loop.index }} value">
               {% endif %}
-              {# A delete is a link, not a scripted button, so one clause can be dropped with the
-                 script blocked: its href is this request with this clause left out and the others in
-                 the order they were written. Named for the reader rather than left as a glyph, since
-                 × alone is not an accessible name, and internal so it carries neither target nor
-                 rel. A blank chip has none — there is nothing committed to remove. #}
-              {% if chip.removal %}<a class="chip-remove" href="{{ chip.removal }}" aria-label="Remove filter {{ loop.index }}" title="Remove this filter">&times;</a>{% endif %}
+              {# Every row gets a delete, and neither kind needs a script. A clause already in the
+                 query is a plain link whose href is this request with that clause left out and the
+                 others in the order they were written — internal, so no target and no rel. A row a
+                 reader has only just added is in no URL to subtract from, so it takes the shape
+                 "+ filter" already takes: a named submit carrying the row's own index, which the
+                 server strips before it reads the surface. The two read identically, and both carry
+                 a name, since × alone is not an accessible one. #}
+              {% if chip.removal %}<a class="chip-remove" href="{{ chip.removal }}" aria-label="Remove filter {{ loop.index }}" title="Remove this filter">&times;</a>{% else %}<button class="chip-remove" type="submit" name="{{ remove_filter_argument }}" value="{{ chip.index }}" aria-label="Remove filter {{ loop.index }}" title="Remove this filter">&times;</button>{% endif %}
             </span>
             {% endfor %}
           </span>
@@ -150,7 +152,7 @@
                 <option value="asc"{{ ' selected' if chip.direction == 'asc' }}>Ascending</option>
                 <option value="desc"{{ ' selected' if chip.direction == 'desc' }}>Descending</option>
               </select>
-              {% if chip.removal %}<a class="chip-remove" href="{{ chip.removal }}" aria-label="Remove sort {{ loop.index }}" title="Remove this sort">&times;</a>{% endif %}
+              {% if chip.removal %}<a class="chip-remove" href="{{ chip.removal }}" aria-label="Remove sort {{ loop.index }}" title="Remove this sort">&times;</a>{% else %}<button class="chip-remove" type="submit" name="{{ remove_sort_argument }}" value="{{ chip.index }}" aria-label="Remove sort {{ loop.index }}" title="Remove this sort">&times;</button>{% endif %}
             </span>
             {% endfor %}
           </span>
@@ -281,6 +283,8 @@
 {
   "filterArgument": {{ filter_argument | tojson }},
   "sortArgument": {{ sort_argument | tojson }},
+  "removeFilterArgument": {{ remove_filter_argument | tojson }},
+  "removeSortArgument": {{ remove_sort_argument | tojson }},
   "anyOperators": [{% for operator in all_operators %}{"name": {{ operator.name | tojson }}, "label": {{ operator.label | tojson }}, "arity": {{ operator.arity | tojson }}}{{ ',' if not loop.last }}{% endfor %}],
   "columns": {
     {%- for name, column in tests_table.columns.items() %}

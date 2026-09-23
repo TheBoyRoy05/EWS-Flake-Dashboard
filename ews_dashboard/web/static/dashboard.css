@@ -517,6 +517,14 @@ code {
     font-variant-numeric: tabular-nums;
 }
 
+/* The two pill lines, and only those two. A pill is a filled box, so two of them stacked with no
+   space between read as one two-tone block rather than two labels: measured, STRONG's box ended at the
+   exact pixel UNPROVEN's began. The gap goes on the SECOND of the pair, so the plain text lines above
+   keep the rhythm they already read correctly in, and the pills themselves are untouched. */
+.subcategories .pill-line + .pill-line {
+    margin-top: 4px;
+}
+
 /* State: a tinted pill carrying both a colour and a word */
 
 .state {
@@ -1073,29 +1081,42 @@ code {
 /* One clause's own delete, parked at the chip's right edge by its own auto margin so the column of
    them shares that edge. Sized to a control's height rather than to the glyph, so it is a target a
    pointer can hit and a focus ring has a box to draw around; the underline every link in this file
-   takes on hover is dropped, because a one-glyph link underlines as a stray mark. */
-.chip-remove {
+   takes on hover is dropped, because a one-glyph link underlines as a stray mark.
+
+   Two elements wear this class and must be indistinguishable: an `<a>` on a row whose clause is in
+   the query, and a `<button>` on a row that is not in any URL yet. Hence the button resets — without
+   them `.filter-form button` gives this one the pill chrome Apply wears. Selected as `.chip
+   .chip-remove` rather than `.chip-remove` so it outranks that rule instead of tying with it. */
+.chip .chip-remove {
     margin-left: auto;
     flex: none;
     display: flex;
     align-items: center;
     justify-content: center;
+    box-sizing: border-box;
     width: 1.6em;
     height: 1.9em;
+    padding: 0;
+    appearance: none;
+    -webkit-appearance: none;
+    border: 1px solid transparent;
+    background: none;
     border-radius: var(--radius-small);
     color: var(--faint);
+    font: inherit;
     font-size: 1.05em;
     line-height: 1;
+    cursor: pointer;
 }
 
-.chip-remove:hover,
-.chip-remove:focus {
+.chip .chip-remove:hover,
+.chip .chip-remove:focus {
     background: var(--panel-hover);
     color: var(--ink);
     text-decoration: none;
 }
 
-.chip-remove:focus-visible {
+.chip .chip-remove:focus-visible {
     outline: 1px solid var(--accent);
     outline-offset: 1px;
 }

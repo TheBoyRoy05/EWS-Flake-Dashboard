@@ -121,8 +121,8 @@
            colour for the same claim. The other lines stay plain, which is what makes this one read as
            the answer and them as the detail behind it. #}
         <span class="split text tiny">and the rate increase is</span>
-        <span class="line text tiny" title="The rise after the landing is larger than the evidence could explain by chance, at alpha {{ '%.2f' | format(significance_alpha) }}. STRONG no longer means a share of the runs after the landing failing."><span class="label"><span class="state {{ escaped_verdict | state_class }}">STRONG</span></span><span class="tally">{{ subcategories.significant | count }}</span></span>
-        <span class="line text tiny" title="The rise is not distinguishable from chance. Not the same as no failures: main did fail the test after the landing, and nobody has shown the landing raised the rate."><span class="label"><span class="state state-UNPROVEN">UNPROVEN</span></span><span class="tally">{{ subcategories.not_significant | count }}</span></span>
+        <span class="line pill-line text tiny" title="The rise after the landing is larger than the evidence could explain by chance, at alpha {{ '%.2f' | format(significance_alpha) }}. STRONG no longer means a share of the runs after the landing failing."><span class="label"><span class="state {{ escaped_verdict | state_class }}">STRONG</span></span><span class="tally">{{ subcategories.significant | count }}</span></span>
+        <span class="line pill-line text tiny" title="The rise is not distinguishable from chance. Not the same as no failures: main did fail the test after the landing, and nobody has shown the landing raised the rate."><span class="label"><span class="state state-UNPROVEN">UNPROVEN</span></span><span class="tally">{{ subcategories.not_significant | count }}</span></span>
       </div>
       {% endif %}
       {% endfor %}
@@ -189,12 +189,14 @@
                 {% else %}
                 <input type="{{ chip.input_type }}" name="{{ filter_chip_argument(escapes_table, chip.index, 'value') }}" class="chip-value" value="{{ chip.value }}" aria-label="Filter {{ loop.index }} value">
                 {% endif %}
-                {# A delete is a link, not a scripted button, so one clause can be dropped with the
-                   script blocked: its href is this request with this clause left out and the others
-                   in the order they were written. Named for the reader rather than left as a glyph,
-                   since × alone is not an accessible name, and internal so it carries neither
-                   target nor rel. A blank chip has none — there is nothing committed to remove. #}
-                {% if chip.removal %}<a class="chip-remove" href="{{ chip.removal }}" aria-label="Remove filter {{ loop.index }}" title="Remove this filter">&times;</a>{% endif %}
+                {# Every row gets a delete, and neither kind needs a script. A clause already in
+                   the query is a plain link whose href is this request with that clause left out and
+                   the others in the order they were written — internal, so no target and no rel. A
+                   row a reader has only just added is in no URL to subtract from, so it takes the
+                   shape "+ filter" already takes: a named submit carrying the row's own index, which
+                   the server strips before it reads the surface. The two read identically, and both
+                   carry a name, since × alone is not an accessible one. #}
+                {% if chip.removal %}<a class="chip-remove" href="{{ chip.removal }}" aria-label="Remove filter {{ loop.index }}" title="Remove this filter">&times;</a>{% else %}<button class="chip-remove" type="submit" name="{{ remove_filter_argument }}" value="{{ chip.index }}" aria-label="Remove filter {{ loop.index }}" title="Remove this filter">&times;</button>{% endif %}
               </span>
               {% endfor %}
             </span>
@@ -215,7 +217,7 @@
                   <option value="asc"{{ ' selected' if chip.direction == 'asc' }}>Ascending</option>
                   <option value="desc"{{ ' selected' if chip.direction == 'desc' }}>Descending</option>
                 </select>
-                {% if chip.removal %}<a class="chip-remove" href="{{ chip.removal }}" aria-label="Remove sort {{ loop.index }}" title="Remove this sort">&times;</a>{% endif %}
+                {% if chip.removal %}<a class="chip-remove" href="{{ chip.removal }}" aria-label="Remove sort {{ loop.index }}" title="Remove this sort">&times;</a>{% else %}<button class="chip-remove" type="submit" name="{{ remove_sort_argument }}" value="{{ chip.index }}" aria-label="Remove sort {{ loop.index }}" title="Remove this sort">&times;</button>{% endif %}
               </span>
               {% endfor %}
             </span>
@@ -264,8 +266,12 @@
             <td class="{{ 'numeric ' if conviction.verdict in escape_verdicts }}text tiny">{% if conviction.verdict in escape_verdicts %}{% if conviction.runs_before %}<span class="evidence">{{ conviction.failed_before }}/{{ conviction.runs_before }}</span>{% else %}—{% endif %}{% else %}{{ reason(conviction) }}{% endif %}</td>
             <td class="when text tiny">{% if conviction.landed_at is none %}Landing time unknown{% else %}{{ conviction.landed_at | moment }}{% endif %}</td>
             <td class="text tiny links">
-              <a href="{{ links.build(conviction.builder_id, conviction.build_number) }}" target="_blank" rel="noopener">Build</a>
+              {# PR first: a reader scanning this column is going to the change, not to the build that
+                 convicted it. Still conditional, and `{% if %}` emits nothing at all when the id is
+                 absent, so a row without a pull request leaves no gap and no empty link — the cell
+                 just starts at Build. All three leave this host, so all three keep target and rel. #}
               {% if conviction.pr_id %}<a href="{{ links.pull_request(conviction.pr_id) }}" target="_blank" rel="noopener">PR</a>{% endif %}
+              <a href="{{ links.build(conviction.builder_id, conviction.build_number) }}" target="_blank" rel="noopener">Build</a>
               <a href="{{ links.test_investigation(conviction.configuration, conviction.test_name) }}" target="_blank" rel="noopener">History</a>
             </td>
             <td class="numeric text tiny">{% if conviction.verdict not in escape_verdicts or conviction.rate_increase is none %}—{% else %}{{ (conviction.rate_increase * 100) | round(1) | percent }}<span class="evidence">{{ conviction.failed_after }}/{{ conviction.runs_after }}</span>{% endif %}</td>
@@ -331,6 +337,8 @@
 {
   "filterArgument": {{ filter_argument | tojson }},
   "sortArgument": {{ sort_argument | tojson }},
+  "removeFilterArgument": {{ remove_filter_argument | tojson }},
+  "removeSortArgument": {{ remove_sort_argument | tojson }},
   "anyOperators": [{% for operator in all_operators %}{"name": {{ operator.name | tojson }}, "label": {{ operator.label | tojson }}, "arity": {{ operator.arity | tojson }}}{{ ',' if not loop.last }}{% endfor %}],
   "columns": {
     {%- for name, column in escapes_table.columns.items() %}
