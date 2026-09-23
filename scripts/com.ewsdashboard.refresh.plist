@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Runs one data refresh a day.
+
+     StartCalendarInterval rather than StartInterval on purpose: man 5 launchd.plist says
+     StartInterval misses a firing that falls while the machine is asleep, while
+     StartCalendarInterval "will start the job the next time the computer wakes up", coalescing
+     several missed days into one run. On a laptop that is the whole point — the job fires when the
+     lid opens rather than never.
+
+     Install with:
+       cp scripts/com.ewsdashboard.refresh.plist ~/Library/LaunchAgents/
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ewsdashboard.refresh.plist
+     Remove with:
+       launchctl bootout gui/$(id -u)/com.ewsdashboard.refresh
+     Run once now, without waiting for the schedule:
+       launchctl kickstart -p gui/$(id -u)/com.ewsdashboard.refresh
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ewsdashboard.refresh</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>/Users/issacroy/Work/Flakes/scripts/daily-refresh.sh</string>
+    </array>
+
+    <!-- 09:00 local. Anything missed while asleep runs on the next wake. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- The script keeps its own dated log; these two catch anything that escapes it, such as an
+         interpreter that will not start at all. -->
+    <key>StandardOutPath</key>
+    <string>/Users/issacroy/Work/Flakes/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/issacroy/Work/Flakes/logs/launchd.err.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/issacroy/Work/Flakes</string>
+
+    <!-- The pass is long and entirely network-bound, so it must not compete with what the person at
+         the keyboard is doing. Low priority nice value, and background I/O throttling. -->
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Never restart on exit: a failed run should wait for tomorrow, not spin. -->
+    <key>KeepAlive</key>
+    <false/>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
