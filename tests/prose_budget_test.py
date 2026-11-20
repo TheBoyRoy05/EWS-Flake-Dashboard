@@ -7,13 +7,17 @@ Raising one is a deliberate edit with a reason written beside it, not a way past
 Prose grows one clause at a time and every clause looks harmless, which is why this is a test and not
 a note in a style guide. A reader has a small budget of attention, spends it scanning rather than
 reading, and an explanation twice as long is usually less informative because it pushes the
-load-bearing figure out of view. Two things are measured:
+load-bearing figure out of view. Three things are measured:
 
-* every block in `BUDGETS` against its ceiling, and the widest single cell of the convictions table's
-  fourth column, which is where 4,359 words of English used to live; and
-* repetition — a row may print each of its three count pairs exactly once. The column that grew to
-  4,359 words fitted no ceiling because no ceiling existed, and most of what it said was a figure
-  printed again in the same row.
+* every block in `BUDGETS` against its ceiling;
+* the widest single cell of the DRILLDOWN's reason column, which is where 4,359 words of English used
+  to live, and the whole of a row in either table — a LISTING row must stay a line of figures rather
+  than growing a description of the group it stands for, and a DRILLDOWN row is where the reason phrase
+  that replaced those 4,359 words sits; and
+* repetition — a listing row may print no count pair at all (no pooling of the three is honest), and a
+  drilldown row prints each of its three exactly once. The column that grew to 4,359 words fitted no
+  ceiling because no ceiling existed, and most of what it said was a figure printed again in the same
+  row.
 
 Counted on the RENDERED page: tags stripped, entities resolved, whitespace collapsed. The source
 carries comments, class names and URLs nobody reads, and it is the reader's attention being budgeted.
@@ -36,10 +40,23 @@ ESCAPES = '/escapes'
 TAGS = re.compile(r'<[^>]+>')
 SPACE = re.compile(r'\s+')
 
-# The fourth cell of a conviction row: the baseline pair in the merged escape bucket, and a reason
-# phrase in every category whose two numeric cells are em dashes. Found by position because both of
-# its neighbours carry the classes it does.
-REASON_COLUMN = 3
+# The listing and drilldown tables, located by their own opening tags. The drilldown's carries an
+# `aria-labelledby` after the class, so it is matched on the prefix.
+LISTING_TABLE = '<table class="table full-width convictions">'
+DRILLDOWN_TABLE = '<table class="table full-width escape-convictions"'
+
+# How many rendered words a LISTING row may hold, which is a ceiling on the row itself rather than on
+# one cell. A row is Test, Rule, Queues, Count, Landed and — in the merged escape bucket only — Rate
+# increase and Current damage: a test path and a rule name, four figures and a date. The widest row
+# measured 10 words, and the cap exists because a grouped row is exactly where a description of the
+# group would be tempting — the honest ones are the column headers' own title attributes, which cost no
+# rendered words.
+LISTING_ROW_WORDS = 12
+
+# The same ceiling for a DRILLDOWN row, which holds one conviction: a queue name, a date, the count
+# pairs or a reason phrase, and three link names. The widest row measured 11 words, and a row in a
+# category main answered nothing about spends `escapes.REASON_WORDS` of its own on the reason.
+DRILLDOWN_ROW_WORDS = 14
 
 
 class Budget(NamedTuple):
@@ -60,14 +77,10 @@ BUDGETS = (
     # The definitions and the caveats, folded into one collapsed block from two that together ran to
     # 188 words. 146 rendered when this was written.
     Budget('escapes legend', ESCAPES, '<details class="section legend-pane">', 'details', 150),
-    # The three headline cards: their labels, values and denominators together. 43 when written.
-    Budget('escapes headline cards', ESCAPES, '<div class="row metrics">', 'div', 50),
+    # The two headline figures and their labels.
+    Budget('escapes headline figures', ESCAPES, '<div class="strip-figures">', 'div', 50),
     # The splits under the escape bucket, which are labels beside counts rather than prose. 53.
     Budget('escapes significance split', ESCAPES, '<div class="subcategories">', 'div', 60),
-    # The open category's own description, above the table and again in the pane's tooltip. ESCAPED's
-    # is the longest. It was 117 words, most of them a rationale or a definition printed again in the
-    # legend and the split tooltips; 47 after the cut this budget caught.
-    Budget('escapes category meaning', ESCAPES, '<p class="meaning text tiny">', 'p', 60),
 )
 
 # The reason column's own ceiling is `escapes.REASON_WORDS`: a category main answered nothing about
@@ -105,14 +118,44 @@ def block(page: str, opening: str, tag: str) -> str:
             return page[start:index]
 
 
+def _table_body(page: str, opening: str) -> str:
+    """The `<tbody>` of the table that opening tag starts.
+
+    Raises rather than returning nothing when the table is absent, for the reason `block` does: a row
+    helper that quietly finds no rows turns every ceiling taken over those rows green without measuring
+    a single one.
+    """
+    table = page.index(opening)
+    body = page.index('<tbody>', table) + len('<tbody>')
+    return page[body:page.index('</tbody>', body)]
+
+
+def _rows(body: str) -> list:
+    return [f'<tr{fragment.split("</tr>")[0]}</tr>' for fragment in body.split('<tr')[1:]]
+
+
 def rows(page: str) -> list:
-    """Each conviction row of the listing, as its own HTML."""
-    body = page.split('<tbody>')[1].split('</tbody>')[0]
-    return [f'<tr>{fragment}' for fragment in body.split('<tr>')[1:]]
+    """Each row of the LISTING, as its own HTML. Selected out of its own table's `<tbody>` rather than
+    by the `class` attribute a row carries, which only the open row has one of."""
+    return _rows(_table_body(page, LISTING_TABLE))
+
+
+def drilldown_rows(page: str) -> list:
+    """Each conviction row of the open drilldown, as its own HTML."""
+    return _rows(_table_body(page, DRILLDOWN_TABLE))
 
 
 def cells(row: str) -> list:
     return re.findall(r'<td[^>]*>(.*?)</td>', row, re.S)
+
+
+def reason_cell(row: str) -> str:
+    """The DRILLDOWN cell right after Landed: the baseline pair in the merged escape bucket, a reason
+    phrase everywhere else. Found by its neighbour, not by position, because the Queue column before
+    Landed only renders when the pane spans more than one queue."""
+    after_landed = re.search(r'<td class="when[^"]*"[^>]*>.*?</td>\s*<td[^>]*>(.*?)</td>', row, re.S)
+    assert after_landed, 'drilldown row has no Landed cell'
+    return after_landed.group(1)
 
 
 class ProseBudget(WebTest):
@@ -178,15 +221,64 @@ class TestBlockBudgets(ProseBudget):
         self.assertGreater(counted, impossible.ceiling)
 
 
-class TestReasonColumnBudget(ProseBudget):
-    """The column that replaced the Why sentence, which was 4,359 rendered words over 200 rows."""
+class TestListingRowBudget(ProseBudget):
+    """A grouped row is a line of figures, not a description of the group behind it."""
 
-    def test_no_cell_of_the_reason_column_exceeds_the_phrase_cap(self) -> None:
+    def test_no_listing_row_exceeds_the_row_ceiling(self) -> None:
         self.one_of_every_verdict()
         for category in escapes.CATEGORIES:
             page = self.page(f'{ESCAPES}?verdict={category}')
             for row in rows(page):
-                counted = len(words(cells(row)[REASON_COLUMN]))
+                counted = len(words(row))
+                self.assertLessEqual(
+                    counted, LISTING_ROW_WORDS,
+                    f'a {category} listing row renders {counted} words, ceiling '
+                    f'{LISTING_ROW_WORDS}. Cut copy — do not raise the ceiling.')
+
+    def test_a_listing_row_prints_no_count_pair_at_all(self) -> None:
+        """No pooling of the three pairs is honest over a group, so the row carries none of them and
+        says how many convictions it stands for instead."""
+        self._escape(1, 'fast/a.html', escapes.ESCAPED)
+        row = rows(self.page(ESCAPES))[0]
+        for pair in ('0/98', '7/108', '0/259'):
+            self.assertNotIn(pair, row, pair)
+
+    def test_no_drilldown_row_exceeds_the_row_ceiling(self) -> None:
+        """One conviction's row is figures and link names, and it is the row a reason phrase is on, so
+        it is the row prose would grow back into."""
+        self.one_of_every_verdict()
+        for category in escapes.CATEGORIES:
+            page = self.page(f'{ESCAPES}?verdict={category}&test=fast/{category.lower()}.html')
+            for row in drilldown_rows(page):
+                counted = len(words(row))
+                self.assertLessEqual(
+                    counted, DRILLDOWN_ROW_WORDS,
+                    f'a {category} drilldown row renders {counted} words, ceiling '
+                    f'{DRILLDOWN_ROW_WORDS}. Cut copy — do not raise the ceiling.')
+
+    def test_a_row_helper_whose_table_was_renamed_fails_instead_of_finding_no_rows(self) -> None:
+        """Both ceilings above are taken over whatever these helpers return, so a helper that quietly
+        returns nothing passes them on nothing."""
+        self.one_of_every_verdict()
+        page = self.page(ESCAPES)
+        self.assertNotEqual(rows(page), [])
+        with self.assertRaises(ValueError):
+            _table_body(page, '<table class="a-table-this-page-does-not-have">')
+        with self.assertRaises(ValueError):
+            drilldown_rows(page)
+
+
+class TestReasonColumnBudget(ProseBudget):
+    """The column that replaced the Why sentence, which was 4,359 rendered words over 200 rows. It is
+    in the drilldown now, where it describes one conviction rather than a group."""
+
+    def test_no_cell_of_the_reason_column_exceeds_the_phrase_cap(self) -> None:
+        self.one_of_every_verdict()
+        for category in escapes.CATEGORIES:
+            page = self.page(f'{ESCAPES}?verdict={category}'
+                             f'&test=fast/{category.lower()}.html')
+            for row in drilldown_rows(page):
+                counted = len(words(reason_cell(row)))
                 self.assertLessEqual(
                     counted, escapes.REASON_WORDS,
                     f'a {category} row renders {counted} words in the reason column, ceiling '
@@ -194,7 +286,7 @@ class TestReasonColumnBudget(ProseBudget):
 
     def test_the_escape_bucket_s_cell_is_the_baseline_pair_and_nothing_else(self) -> None:
         self._escape(1, 'fast/a.html', escapes.ESCAPED)
-        cell = cells(rows(self.page(ESCAPES))[0])[REASON_COLUMN]
+        cell = reason_cell(drilldown_rows(self.page(f"{ESCAPES}?test=fast/a.html"))[0])
         self.assertEqual(words(cell), ['0/98'])
 
     def test_a_category_main_answered_nothing_about_still_says_why(self) -> None:
@@ -204,8 +296,9 @@ class TestReasonColumnBudget(ProseBudget):
                                    (escapes.NO_RUNS, 'No runs after the landing'),
                                    (escapes.NO_BASELINE, 'Failed 7 of 108, nothing before'),
                                    (escapes.TREE_DIVERGED, 'Built 2 times across 2 heads')):
-            page = self.page(f'{ESCAPES}?verdict={category}')
-            cell = ' '.join(words(cells(rows(page)[0])[REASON_COLUMN]))
+            page = self.page(f'{ESCAPES}?verdict={category}'
+                             f'&test=fast/{category.lower()}.html')
+            cell = ' '.join(words(reason_cell(drilldown_rows(page)[0])))
             self.assertEqual(cell, expected, category)
 
 
@@ -213,10 +306,10 @@ class TestRowRepetition(ProseBudget):
     """No figure twice in one row. This is the check the Why column would have failed for months: it
     fitted no ceiling, and most of what it printed was a count printed again beside it."""
 
-    def test_a_row_prints_each_of_its_count_pairs_exactly_once(self) -> None:
+    def test_a_drilldown_row_prints_each_of_its_count_pairs_exactly_once(self) -> None:
         self._escape(1, 'fast/a.html', escapes.ESCAPED, runs_before=98, failed_before=0,
                      runs_after=108, failed_after=7, recent_runs=259, recent_failed=0)
-        row = rows(self.page(ESCAPES))[0]
+        row = drilldown_rows(self.page(f'{ESCAPES}?test=fast/a.html'))[0]
         for pair in ('0/98', '7/108', '0/259'):
             self.assertEqual(row.count(pair), 1,
                              f'{pair} appears {row.count(pair)} times in one row')
@@ -225,6 +318,6 @@ class TestRowRepetition(ProseBudget):
         """The prose this replaced said "7 of 108 runs after the landing" beside a cell already
         reading 7/108, and "none of its 259 runs" beside one reading 0/259."""
         self._escape(1, 'fast/a.html', escapes.ESCAPED)
-        row = rows(self.page(ESCAPES))[0]
+        row = drilldown_rows(self.page(f'{ESCAPES}?test=fast/a.html'))[0]
         for restatement in ('7 of 108', '259 runs', 'after the landing'):
             self.assertNotIn(restatement, row, restatement)

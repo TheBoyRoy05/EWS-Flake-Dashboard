@@ -439,6 +439,40 @@ class TestSubcategories(fixtures.DatabaseTest):
         self.assertEqual(self._subcategories(builders=(fixtures.GTK_BUILDER,)).total, 0)
         self.assertEqual(self._subcategories(builders=(fixtures.LAYOUT_BUILDER,)).total, 1)
 
+    def test_the_head_counts_the_same_convictions_the_listing_pages_through(self) -> None:
+        """The defect this closes: the head counted from a source of its own and the listing from one
+        that joins the flakiness verdict, so a stored verdict whose conviction had gone was a distinct
+        test in the head and no row in the tally. A conviction is a flakiness verdict that HAS a rule, so
+        neither counts one without it now, and the two numbers a reader sees side by side agree."""
+        self._escape(1, runs_after=96, failed_after=90)
+        self._escape(2, runs_after=96, failed_after=90)
+        with self.connection:
+            self.connection.execute('DELETE FROM flakiness_verdicts WHERE test_name = ?',
+                                   ('fast/2.html',))
+        listed = escapes.answered_tests(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                        fixtures.DEFAULT_BUILD_TIME + DAY,
+                                        escapes.MERGED_ESCAPE_VERDICTS)
+        self.assertEqual(self._subcategories().distinct_tests, listed.total)
+        self.assertEqual([one.test_name for one in listed.tests], ['fast/1.html'])
+
+    def test_a_conviction_whose_rule_was_withdrawn_is_in_neither_count(self) -> None:
+        """`flakiness_verdicts.rule` is nullable, and a row without one is a test the bot asked about and
+        did not convict. The tally, the head's splits and the listing all read `CONVICTED`, so none of
+        them counts a verdict stored against a conviction that no longer exists."""
+        self._escape(1, runs_after=96, failed_after=90)
+        self._escape(2, runs_after=96, failed_after=90)
+        with self.connection:
+            self.connection.execute('UPDATE flakiness_verdicts SET rule = NULL WHERE test_name = ?',
+                                   ('fast/2.html',))
+        counted = escapes.tally(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                fixtures.DEFAULT_BUILD_TIME + DAY)
+        listed = escapes.answered_tests(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                        fixtures.DEFAULT_BUILD_TIME + DAY,
+                                        escapes.MERGED_ESCAPE_VERDICTS)
+        split = self._subcategories()
+        self.assertEqual((counted.escaped, split.total, split.distinct_tests, listed.total),
+                         (1, 1, 1, 1))
+
 
 class TestAssessOne(fixtures.DatabaseTest):
     def test_the_landing_commit_belongs_to_the_window_after_it_and_not_to_the_baseline(self) -> None:
@@ -876,8 +910,8 @@ class TestReason(fixtures.DatabaseTest):
         self.assertEqual(escapes.reason(escape), '')
 
 
-class TestConvictions(fixtures.DatabaseTest):
-    """The individual convictions behind one verdict's count."""
+class TestDrilldownConvictions(fixtures.DatabaseTest):
+    """The individual convictions behind one test's row, which is what the drilldown lists."""
 
     def _convict(self, number: int, test_name: str, verdict: str, pr_id: int,
                  builder: str = fixtures.LAYOUT_BUILDER, builder_id: int = 7,
@@ -896,38 +930,94 @@ class TestConvictions(fixtures.DatabaseTest):
             )
         return build_id
 
-    def _convictions(self, verdict: str, **scope: object) -> list:
-        """The page's rows alone, since every test in this class is about one row's own contents."""
-        return escapes.convictions(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
-                                   fixtures.DEFAULT_BUILD_TIME + DAY, verdict,
-                                   **scope).convictions
+    def _convictions(self, verdict: str, test_name: str = TEST, **scope: object) -> tuple:
+        """One test's convictions alone, since every test in this class is about one row's contents."""
+        return escapes.test_convictions(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                        fixtures.DEFAULT_BUILD_TIME + DAY, verdict, test_name,
+                                        **scope).convictions
 
-    def test_only_the_convictions_with_the_asked_for_verdict_are_listed(self) -> None:
+    def test_only_the_convictions_of_the_opened_test_in_the_open_category_are_listed(self) -> None:
         self._convict(1, TEST, escapes.CONTAINED, pr_id=1)
-        self._convict(2, 'fast/b.html', escapes.NO_RUNS, pr_id=2)
+        self._convict(2, 'fast/b.html', escapes.CONTAINED, pr_id=2)
         listed = self._convictions(escapes.CONTAINED)
         self.assertEqual([(one.test_name, one.verdict) for one in listed],
                          [(TEST, escapes.CONTAINED)])
         self.assertEqual(listed[0].rule, config.CLEAN_TREE)
         self.assertEqual(listed[0].landed_at, LANDED_AT)
 
+    def test_a_test_with_no_conviction_in_the_open_category_lists_nothing(self) -> None:
+        """The pane is scoped to one category, so opening a row cannot reach convictions main
+        answered another way — those are a row of that category's own listing."""
+        self._convict(1, TEST, escapes.CONTAINED, pr_id=1)
+        self.assertEqual(self._convictions(escapes.NO_RUNS), ())
+
     def test_a_queue_the_page_is_narrowed_to_narrows_the_list_too(self) -> None:
         self._convict(1, TEST, escapes.CONTAINED, pr_id=1)
-        self._convict(2, 'fast/b.html', escapes.CONTAINED, pr_id=2,
-                      builder=fixtures.GTK_BUILDER, builder_id=9)
+        self._convict(2, TEST, escapes.CONTAINED, pr_id=2, builder=fixtures.GTK_BUILDER,
+                      builder_id=9)
         self.assertEqual(
-            [one.test_name for one in self._convictions(escapes.CONTAINED,
-                                                        builders=(fixtures.GTK_BUILDER,))],
-            ['fast/b.html'],
+            [one.builder for one in self._convictions(escapes.CONTAINED,
+                                                      builders=(fixtures.GTK_BUILDER,))],
+            [fixtures.GTK_BUILDER],
         )
 
     def test_a_suite_the_page_is_narrowed_to_narrows_the_list_too(self) -> None:
         self._convict(1, TEST, escapes.CONTAINED, pr_id=1)
         self._convict(2, 'TestWebKitAPI.A.b', escapes.CONTAINED, pr_id=2,
                       builder=fixtures.API_BUILDER, builder_id=8)
-        self.assertEqual([one.test_name for one in self._convictions(escapes.CONTAINED,
-                                                                     suite='api-tests')],
+        self.assertEqual([one.test_name for one in
+                          self._convictions(escapes.CONTAINED, test_name='TestWebKitAPI.A.b',
+                                            suite='api-tests')],
                          ['TestWebKitAPI.A.b'])
+        self.assertEqual(self._convictions(escapes.CONTAINED, suite='api-tests'), ())
+
+    def test_the_newest_conviction_is_listed_first(self) -> None:
+        """A conviction list reads by when it landed, and the build id behind that makes the order
+        total: the pane is capped, so two renders must not disagree about what the cap kept."""
+        self._convict(1, TEST, escapes.CONTAINED, pr_id=1)
+        self._convict(2, TEST, escapes.CONTAINED, pr_id=2, landed_at=LANDED_AT + 600)
+        self.assertEqual([one.pr_id for one in self._convictions(escapes.CONTAINED)], [2, 1])
+
+    def test_the_cap_is_reported_rather_than_silently_cutting_the_list(self) -> None:
+        for number in range(1, 4):
+            self._convict(number, TEST, escapes.CONTAINED, pr_id=number)
+        capped = escapes.test_convictions(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                          fixtures.DEFAULT_BUILD_TIME + DAY, escapes.CONTAINED,
+                                          TEST, limit=2)
+        self.assertEqual((len(capped.convictions), capped.total), (2, 3))
+        self.assertTrue(capped.truncated)
+
+    def test_a_reader_s_own_clause_narrows_the_list_the_way_it_narrowed_the_row(self) -> None:
+        """The defect this closes: the listing row honoured a `queue` clause and the pane beside it did
+        not, so the row's own Convictions cell read one number and the pane it opened read another over
+        the same test. Both read through one predicate now, so the pane's total IS the row's count."""
+        self._convict(1, TEST, escapes.CONTAINED, pr_id=1)
+        self._convict(2, TEST, escapes.CONTAINED, pr_id=2, builder=fixtures.GTK_BUILDER,
+                      builder_id=9)
+        self._convict(3, TEST, escapes.CONTAINED, pr_id=3, builder=fixtures.GTK_BUILDER,
+                      builder_id=9)
+        narrowing = filters.parse(filters.ESCAPES,
+                                 (('queue', 'eq', fixtures.LAYOUT_BUILDER),))
+        pane = escapes.test_convictions(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                       fixtures.DEFAULT_BUILD_TIME + DAY, escapes.CONTAINED, TEST,
+                                       conditions=narrowing)
+        row = escapes.answered_tests(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                     fixtures.DEFAULT_BUILD_TIME + DAY, escapes.CONTAINED,
+                                     conditions=narrowing).tests[0]
+        self.assertEqual((pane.total, len(pane.convictions)), (row.convictions, row.convictions))
+        self.assertEqual([one.builder for one in pane.convictions], [fixtures.LAYOUT_BUILDER])
+
+    def test_a_clause_about_the_group_does_not_narrow_the_convictions_inside_one(self) -> None:
+        """An aggregate clause is the HAVING half: it chose which tests the listing holds, and inside
+        one of those tests there is no group left for it to narrow. So the pane still lists every
+        conviction the row counted rather than the none a `COUNT(*) >= 2` would leave of a single row."""
+        self._convict(1, TEST, escapes.CONTAINED, pr_id=1)
+        self._convict(2, TEST, escapes.CONTAINED, pr_id=2)
+        grouped = filters.parse(filters.ESCAPES, (('convictions', 'ge', '2'),))
+        pane = escapes.test_convictions(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                       fixtures.DEFAULT_BUILD_TIME + DAY, escapes.CONTAINED, TEST,
+                                       conditions=grouped)
+        self.assertEqual((pane.total, len(pane.convictions)), (2, 2))
 
     def test_the_heads_of_the_whole_pull_request_are_carried_not_this_build_s(self) -> None:
         """TREE_DIVERGED's sentence is about how far the pull request moved, which one build cannot
@@ -989,8 +1079,8 @@ class TestStoredLandingTime(fixtures.DatabaseTest):
                                 pr_title='A change that landed', sha='a' * 40)
 
     def _listed(self, verdict: str) -> escapes.Conviction:
-        listed = escapes.convictions(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
-                                     fixtures.DEFAULT_BUILD_TIME + DAY, verdict)
+        listed = escapes.test_convictions(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                          fixtures.DEFAULT_BUILD_TIME + DAY, verdict, TEST)
         self.assertEqual(listed.total, 1)
         return listed.convictions[0]
 
@@ -1057,19 +1147,24 @@ class TestStoredLandingTime(fixtures.DatabaseTest):
 
 
 class TestListingOrder(fixtures.DatabaseTest):
-    """What `convictions` orders by, and what it does with a row that gathered no evidence.
+    """What `answered_tests` groups, orders and narrows by.
 
-    The rate increase a page sorts by is the one it prints, because both go through
-    `rate_increase_for_counts` — the sqlite function `db.connect` registers — rather than through a
-    stored column or the formula re-spelled in SQL.
+    A row is one test, so every figure is a reduction of that test's convictions, and the rate increase
+    a page sorts by is the one it prints: both go through `rate_increase_for_counts` — the sqlite
+    function `db.connect` registers — rather than through a stored column or the formula re-spelled in
+    SQL.
     """
 
     def _convict(self, number: int, test_name: str, verdict: str, runs_after: int,
                  failed_after: int, recent_runs: Optional[int] = None,
                  recent_failed: Optional[int] = None,
-                 landed_at: Optional[int] = LANDED_AT) -> int:
-        build_id = self.store_build(number, flaky={test_name: config.CLEAN_TREE}, pr_id=number,
-                                    pr_title='A change that landed', sha='a' * 40)
+                 landed_at: Optional[int] = LANDED_AT,
+                 builder: str = fixtures.LAYOUT_BUILDER, builder_id: int = 7,
+                 checked_at: Optional[int] = None,
+                 rule: str = config.CLEAN_TREE) -> int:
+        build_id = self.store_build(number, flaky={test_name: rule}, pr_id=number,
+                                    pr_title='A change that landed', sha='a' * 40,
+                                    builder=builder, builder_id=builder_id)
         with self.connection:
             self.connection.execute(
                 '''INSERT INTO escape_verdicts (
@@ -1079,30 +1174,140 @@ class TestListingOrder(fixtures.DatabaseTest):
                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                 (build_id, test_name, verdict, 4, 0, runs_after, failed_after, landed_at,
                  LANDED_AT + escapes.ESCAPE_WINDOW_SECONDS, LANDED_AT, recent_runs, recent_failed,
-                 LANDED_AT if recent_runs is not None else None),
+                 (checked_at or LANDED_AT) if recent_runs is not None else None),
             )
         return build_id
 
-    def _listed(self, verdict: str, **keywords: object) -> escapes.ConvictionPage:
-        return escapes.convictions(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
-                                   fixtures.DEFAULT_BUILD_TIME + DAY, verdict, **keywords)
+    def _listed(self, verdict: str, **keywords: object) -> escapes.TestPage:
+        return escapes.answered_tests(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                      fixtures.DEFAULT_BUILD_TIME + DAY, verdict, **keywords)
 
     def _names(self, verdict: str, **keywords: object) -> list:
-        return [one.test_name for one in self._listed(verdict, **keywords).convictions]
+        return [one.test_name for one in self._listed(verdict, **keywords).tests]
+
+    def _configuration_of(self, build_id: int) -> results.Configuration:
+        """One build's whole configuration, so a row's link is compared on every field it is built
+        from — the fixtures differ only in flavor, which is the field a partial comparison drops."""
+        return results.Configuration.of_build(self.connection.execute(
+            'SELECT suite, platform, style, flavor FROM build_verdicts WHERE build_id = ?',
+            (build_id,)).fetchone())
 
     def test_the_registered_function_answers_in_sql_what_the_dataclass_answers_in_python(self) -> None:
         """One definition, called from two places: if these ever disagree the page is printing a
-        figure it did not sort by."""
+        figure it did not sort by. The listed figure is a percentage, since that is the number a
+        reader filters against."""
         self._convict(1, TEST, escapes.ESCAPED, runs_after=8, failed_after=1)
         row = self.connection.execute(
             f'SELECT {config.ESCAPE_INCREASE_FUNCTION}(runs_before, failed_before, runs_after, '
-            'failed_after) AS increase, '
-            f'{config.ESCAPE_DAMAGE_FUNCTION}(recent_runs, recent_failed) AS damage '
-            'FROM escape_verdicts').fetchone()
-        listed = self._listed(escapes.ESCAPED).convictions[0]
-        self.assertAlmostEqual(row['increase'], listed.rate_increase, places=12)
-        self.assertIsNone(row['damage'])
-        self.assertIsNone(listed.damage)
+            'failed_after) AS increase FROM escape_verdicts').fetchone()
+        listed = self._listed(escapes.ESCAPED).tests[0]
+        self.assertAlmostEqual(row['increase'] * 100, listed.rate_increase_pct, places=12)
+        self.assertIsNone(listed.damage_pct)
+
+    def test_one_row_per_test_however_many_convictions_it_has(self) -> None:
+        """The whole of the grouping: a cascade of convictions on one test is one row that says how
+        many, not a page of rows a reader has to add up themselves."""
+        self._convict(1, TEST, escapes.ESCAPED, runs_after=10, failed_after=5)
+        self._convict(2, TEST, escapes.ESCAPED, runs_after=10, failed_after=7)
+        self._convict(3, 'fast/other.html', escapes.ESCAPED, runs_after=10, failed_after=1)
+        listed = self._listed(escapes.ESCAPED)
+        self.assertEqual(listed.total, 2)
+        grouped = {one.test_name: one.convictions for one in listed.tests}
+        self.assertEqual(grouped, {TEST: 2, 'fast/other.html': 1})
+
+    def test_a_row_collapses_every_queue_that_convicted_the_test_into_one_row(self) -> None:
+        self._convict(1, TEST, escapes.ESCAPED, runs_after=10, failed_after=5)
+        self._convict(2, TEST, escapes.ESCAPED, runs_after=10, failed_after=5,
+                      builder=fixtures.GTK_BUILDER, builder_id=9)
+        listed = self._listed(escapes.ESCAPED).tests
+        self.assertEqual([(one.test_name, one.convictions) for one in listed], [(TEST, 2)])
+
+    def test_a_row_carries_the_distinct_set_of_rules_that_convicted_the_test(self) -> None:
+        self._convict(1, TEST, escapes.ESCAPED, runs_after=10, failed_after=5)
+        self._convict(2, TEST, escapes.ESCAPED, runs_after=10, failed_after=5,
+                      rule=config.DIRTY_TREE)
+        self._convict(3, TEST, escapes.ESCAPED, runs_after=10, failed_after=5)
+        self.assertEqual(self._listed(escapes.ESCAPED).tests[0].rules,
+                         tuple(sorted((config.CLEAN_TREE, config.DIRTY_TREE))))
+
+    def test_a_row_reports_the_earliest_landing_and_the_worst_rate_increase(self) -> None:
+        """Neither is a statistic over the group: the earliest landing is when the test started
+        failing, and the worst conviction is the one worth reading. Averaging two bounds would report a
+        landing that never happened and a rise nothing measured."""
+        self._convict(1, TEST, escapes.ESCAPED, runs_after=10, failed_after=1,
+                      landed_at=LANDED_AT + 600)
+        self._convict(2, TEST, escapes.ESCAPED, runs_after=10, failed_after=9, landed_at=LANDED_AT)
+        listed = self._listed(escapes.ESCAPED).tests[0]
+        self.assertEqual(listed.landed_at, LANDED_AT)
+        self.assertAlmostEqual(listed.rate_increase_pct,
+                               100 * escapes.rate_increase_for_counts(4, 0, 10, 9), places=12)
+
+    def test_an_unknown_landing_time_does_not_hide_a_known_one_in_the_same_group(self) -> None:
+        """MIN passes over the nulls, so a group holding one backfilled row still reports the earliest
+        landing it does know; a group of nothing but nulls reports none."""
+        self._convict(1, TEST, escapes.ESCAPED, runs_after=10, failed_after=5, landed_at=None)
+        self._convict(2, TEST, escapes.ESCAPED, runs_after=10, failed_after=5)
+        self._convict(3, 'fast/unknown.html', escapes.ESCAPED, runs_after=10, failed_after=5,
+                      landed_at=None)
+        landings = {one.test_name: one.landed_at for one in self._listed(escapes.ESCAPED).tests}
+        self.assertEqual(landings, {TEST: LANDED_AT, 'fast/unknown.html': None})
+
+    def test_a_row_reports_the_damage_at_the_latest_currency_check_it_holds(self) -> None:
+        """The currency answers were asked on different days, and only the newest describes what main
+        is doing now. A group where nobody has been asked reports none, not zero."""
+        self._convict(1, TEST, escapes.ESCAPED, runs_after=10, failed_after=5, recent_runs=40,
+                      recent_failed=20, checked_at=LANDED_AT)
+        self._convict(2, TEST, escapes.ESCAPED, runs_after=10, failed_after=5, recent_runs=50,
+                      recent_failed=5, checked_at=LANDED_AT + 600)
+        self._convict(3, 'fast/unasked.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        damage = {one.test_name: one.damage_pct for one in self._listed(escapes.ESCAPED).tests}
+        self.assertEqual(damage, {TEST: 10.0, 'fast/unasked.html': None})
+
+    def test_two_checks_at_the_same_moment_report_the_worse_rate(self) -> None:
+        """Measured on live data: the assess pass asks about many convictions of one test in one run,
+        so they share a `recent_checked_at` to the second and their counts differ — 30 convictions
+        answering 5 of 100 beside 31 answering 4 of 176. Breaking that tie on arrival order would make
+        the figure depend on the query plan, so the worse rate wins."""
+        self._convict(1, TEST, escapes.ESCAPED, runs_after=10, failed_after=5, recent_runs=176,
+                      recent_failed=4, checked_at=LANDED_AT)
+        self._convict(2, TEST, escapes.ESCAPED, runs_after=10, failed_after=5, recent_runs=100,
+                      recent_failed=5, checked_at=LANDED_AT)
+        self.assertEqual(self._listed(escapes.ESCAPED).tests[0].damage_pct, 5.0)
+
+    def test_a_check_that_got_no_runs_does_not_outrank_a_real_rate_at_the_same_moment(self) -> None:
+        """No runs back is an absence of evidence, not a lower rate, so it must not blank a cell
+        another conviction answered in the same second."""
+        self._convict(1, TEST, escapes.ESCAPED, runs_after=10, failed_after=5, recent_runs=0,
+                      recent_failed=0, checked_at=LANDED_AT)
+        self._convict(2, TEST, escapes.ESCAPED, runs_after=10, failed_after=5, recent_runs=40,
+                      recent_failed=2, checked_at=LANDED_AT)
+        self.assertEqual(self._listed(escapes.ESCAPED).tests[0].damage_pct, 5.0)
+
+    def test_a_row_carries_the_configuration_of_the_conviction_it_took_its_increase_from(self) -> None:
+        """A test convicted on several queues has no single configuration, and the row's own figure
+        came from one conviction: the test-history link it offers is that conviction's.
+
+        Compared whole rather than field by field. The two fixture builds report the same platform and
+        the same style — both carry `CONFIGURATION_PROPERTIES` — and differ only in the flavor their
+        builder name implies, so a comparison of platform and style alone passed whichever build won.
+        """
+        self._convict(1, TEST, escapes.ESCAPED, runs_after=10, failed_after=1)
+        worst_build = self._convict(2, TEST, escapes.ESCAPED, runs_after=10, failed_after=9,
+                                    builder=fixtures.GTK_BUILDER, builder_id=9)
+        expected = self._configuration_of(worst_build)
+        self.assertNotEqual(expected, self._configuration_of(
+            self.connection.execute('SELECT MIN(build_id) FROM escape_verdicts').fetchone()[0]))
+        self.assertEqual(self._listed(escapes.ESCAPED).tests[0].configuration, expected)
+
+    def test_a_group_with_no_bound_at_all_still_names_one_configuration(self) -> None:
+        """Every conviction of a category main answered nothing about has a null bound, so there is no
+        worst one; the newest is named rather than an arbitrary row, so two renders agree."""
+        older = self._convict(1, TEST, escapes.NO_RUNS, runs_after=0, failed_after=0)
+        newest = self._convict(2, TEST, escapes.NO_RUNS, runs_after=0, failed_after=0,
+                               builder=fixtures.GTK_BUILDER, builder_id=9)
+        expected = self._configuration_of(newest)
+        self.assertNotEqual(expected, self._configuration_of(older))
+        self.assertEqual(self._listed(escapes.NO_RUNS).tests[0].configuration, expected)
 
     def test_ordering_by_the_rate_increase_puts_the_worst_landing_first(self) -> None:
         """Which is what the page asks for by default — the default itself lives in the route, the
@@ -1114,12 +1319,20 @@ class TestListingOrder(fixtures.DatabaseTest):
         self.assertEqual(self._names(escapes.ESCAPED, sort_keys=keys),
                          ['fast/hard.html', 'fast/half.html', 'fast/thin.html'])
 
+    def test_ordering_by_a_count_reads_the_group_s_own_count(self) -> None:
+        self._convict(1, 'fast/once.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        self._convict(2, 'fast/twice.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        self._convict(3, 'fast/twice.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        keys = filters.sort_keys(filters.ESCAPES, (('convictions', True),))
+        self.assertEqual(self._names(escapes.ESCAPED, sort_keys=keys),
+                         ['fast/twice.html', 'fast/once.html'])
+
     def test_no_sort_key_at_all_still_leaves_a_total_order(self) -> None:
-        """The tiebreak is the table's primary key and is appended unconditionally, so a caller that
-        passes no key still gets an order two queries cannot disagree about."""
+        """The tiebreak is the group key and is appended unconditionally, so a caller that passes no
+        key still gets an order two queries cannot disagree about."""
         self._convict(1, 'fast/a.html', escapes.ESCAPED, runs_after=10, failed_after=5)
         self._convict(2, 'fast/b.html', escapes.ESCAPED, runs_after=10, failed_after=5)
-        self.assertEqual(self._names(escapes.ESCAPED), ['fast/b.html', 'fast/a.html'])
+        self.assertEqual(self._names(escapes.ESCAPED), ['fast/a.html', 'fast/b.html'])
 
     def test_a_sort_key_the_request_asked_for_leads_the_fallback(self) -> None:
         self._convict(1, 'fast/zzz.html', escapes.ESCAPED, runs_after=10, failed_after=10)
@@ -1152,7 +1365,7 @@ class TestListingOrder(fixtures.DatabaseTest):
         self._convict(2, 'fast/forms/b.html', escapes.ESCAPED, runs_after=10, failed_after=5)
         conditions = filters.parse(filters.ESCAPES, (('test', 'has', 'webgl'),))
         listed = self._listed(escapes.ESCAPED, conditions=conditions)
-        self.assertEqual([one.test_name for one in listed.convictions], ['fast/webgl/a.html'])
+        self.assertEqual([one.test_name for one in listed.tests], ['fast/webgl/a.html'])
         self.assertEqual(listed.total, 1)
 
     def test_a_condition_on_a_derived_column_narrows_through_the_registered_function(self) -> None:
@@ -1162,40 +1375,121 @@ class TestListingOrder(fixtures.DatabaseTest):
         self._convict(2, 'fast/thin.html', escapes.ESCAPED, runs_after=100, failed_after=1)
         conditions = filters.parse(filters.ESCAPES, (('increase', 'ge', '50'),))
         self.assertEqual([one.test_name for one in
-                          self._listed(escapes.ESCAPED, conditions=conditions).convictions],
+                          self._listed(escapes.ESCAPED, conditions=conditions).tests],
                          ['fast/hard.html'])
 
-    def test_a_grouped_clause_is_refused_rather_than_attached_to_a_query_that_never_groups(self) -> None:
-        """Nothing in the ESCAPES registry can produce a HAVING today. This is the guard for whoever
-        registers the first aggregate column: a HAVING on a query with no GROUP BY is read over the
-        whole result as one group, which would narrow by something nobody asked for."""
-        condition = filters.condition(filters.TESTS, 'convictions', 'gt', '2')
-        self.assertIsNotNone(condition)
-        with self.assertRaises(ValueError):
-            self._listed(escapes.ESCAPED, conditions=(condition,))
+    def test_an_aggregate_clause_narrows_by_the_group_and_not_by_one_conviction(self) -> None:
+        """`at least 2 convictions` is a question about the row, which only a HAVING can answer: a
+        WHERE runs before the grouping exists and would have nothing to compare."""
+        self._convict(1, 'fast/once.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        self._convict(2, 'fast/twice.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        self._convict(3, 'fast/twice.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        conditions = filters.parse(filters.ESCAPES, (('convictions', 'ge', '2'),))
+        self.assertEqual([one.test_name for one in
+                          self._listed(escapes.ESCAPED, conditions=conditions).tests],
+                         ['fast/twice.html'])
+
+    def test_a_per_conviction_clause_keeps_the_test_and_narrows_what_its_row_counts(self) -> None:
+        """A queue clause is a WHERE, so it asks which convictions the group is built from: the test
+        is listed because one of its convictions is on that queue, and the row then counts that one
+        alone."""
+        self._convict(1, TEST, escapes.ESCAPED, runs_after=10, failed_after=5)
+        self._convict(2, TEST, escapes.ESCAPED, runs_after=10, failed_after=5,
+                      builder=fixtures.GTK_BUILDER, builder_id=9)
+        conditions = filters.parse(filters.ESCAPES, (('queue', 'eq', fixtures.GTK_BUILDER),))
+        listed = self._listed(escapes.ESCAPED, conditions=conditions).tests
+        self.assertEqual([(one.test_name, one.convictions) for one in listed],
+                         [(TEST, 1)])
+
+    def test_a_rule_set_clause_asks_about_every_rule_the_row_carries(self) -> None:
+        """The same set operators `/tests` already offers on its own rule column, which `clause` sends
+        to HAVING: `any of` is a question about the group, not about one of its convictions."""
+        self._convict(1, 'fast/clean.html', escapes.ESCAPED, runs_after=10, failed_after=5)
+        self._convict(2, 'fast/dirty.html', escapes.ESCAPED, runs_after=10, failed_after=5,
+                      rule=config.DIRTY_TREE)
+        conditions = filters.parse(filters.ESCAPES, (('rule', 'anyof', config.DIRTY_TREE),))
+        self.assertEqual([one.test_name for one in
+                          self._listed(escapes.ESCAPED, conditions=conditions).tests],
+                         ['fast/dirty.html'])
 
 
 class TestListingPages(fixtures.DatabaseTest):
-    """The 200-row cap is a page size now: the remainder is reachable and counted, not cut off."""
+    """The 200-row page size, now counted in TESTS: the remainder is reachable and counted."""
 
-    def _convict_many(self, count: int) -> None:
-        for number in range(1, count + 1):
-            build_id = self.store_build(number, flaky={f'fast/f{number:03d}.html': config.CLEAN_TREE},
-                                        pr_id=number, pr_title='A change that landed', sha='a' * 40)
-            with self.connection:
-                self.connection.execute(
-                    '''INSERT INTO escape_verdicts (
-                        build_id, test_name, verdict, runs_before, failed_before, runs_after,
-                        failed_after, landed_at, window_ends_at, decided_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?)''',
-                    (build_id, f'fast/f{number:03d}.html', escapes.ESCAPED, 4, 0, 10, number,
-                     LANDED_AT, LANDED_AT + escapes.ESCAPE_WINDOW_SECONDS, LANDED_AT),
-                )
+    def _convict_many(self, count: int, convictions_each: int = 1) -> None:
+        number = 0
+        for test in range(1, count + 1):
+            for _ in range(convictions_each):
+                number += 1
+                build_id = self.store_build(
+                    number, flaky={f'fast/f{test:03d}.html': config.CLEAN_TREE}, pr_id=number,
+                    pr_title='A change that landed', sha='a' * 40)
+                with self.connection:
+                    self.connection.execute(
+                        '''INSERT INTO escape_verdicts (
+                            build_id, test_name, verdict, runs_before, failed_before, runs_after,
+                            failed_after, landed_at, window_ends_at, decided_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                        (build_id, f'fast/f{test:03d}.html', escapes.ESCAPED, 4, 0, 10, test,
+                         LANDED_AT, LANDED_AT + escapes.ESCAPE_WINDOW_SECONDS, LANDED_AT),
+                    )
 
-    def _page(self, page: int, limit: int = 2) -> escapes.ConvictionPage:
-        return escapes.convictions(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
-                                   fixtures.DEFAULT_BUILD_TIME + DAY, escapes.ESCAPED,
-                                   limit=limit, page=page)
+    def _page(self, page: int, limit: int = 2) -> escapes.TestPage:
+        return escapes.answered_tests(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                      fixtures.DEFAULT_BUILD_TIME + DAY, escapes.ESCAPED,
+                                      limit=limit, page=page)
+
+    # Three tests ranked differently by every sortable column: six columns, and the six permutations of
+    # three rows, one each. Every value inside a column is distinct, so each order is total and its
+    # descending form is the exact reverse — a sort that reached another column's alias, or an alias the
+    # SELECT never carried, cannot come back with the right sequence by luck.
+    RANKED_CONVICTIONS = {'fast/a.html': 4, 'fast/b.html': 3, 'fast/c.html': 2}
+    RANKED_QUEUES = {'fast/a.html': 1, 'fast/b.html': 3, 'fast/c.html': 2}
+    RANKED_LANDED = {'fast/a.html': 200, 'fast/b.html': 300, 'fast/c.html': 100}
+    RANKED_FAILED_AFTER = {'fast/a.html': 5, 'fast/b.html': 2, 'fast/c.html': 9}
+    RANKED_RECENT_FAILED = {'fast/a.html': 9, 'fast/b.html': 1, 'fast/c.html': 5}
+    RANKED_BUILDERS = ((fixtures.LAYOUT_BUILDER, 7), (fixtures.GTK_BUILDER, 9),
+                       (fixtures.WPE_BUILDER, 11))
+
+    def _distinctly_ranked(self) -> dict:
+        """Store those three tests, and return each sortable column's ascending order of them."""
+        number = 0
+        for test_name, convictions in self.RANKED_CONVICTIONS.items():
+            for index in range(convictions):
+                number += 1
+                builder, builder_id = self.RANKED_BUILDERS[
+                    min(index, self.RANKED_QUEUES[test_name] - 1)]
+                build_id = self.store_build(number, flaky={test_name: config.CLEAN_TREE},
+                                            pr_id=number, pr_title='A change that landed',
+                                            sha='a' * 40, builder=builder, builder_id=builder_id)
+                worst = index == 0
+                with self.connection:
+                    self.connection.execute(
+                        '''INSERT INTO escape_verdicts (
+                            build_id, test_name, verdict, runs_before, failed_before, runs_after,
+                            failed_after, landed_at, window_ends_at, decided_at, recent_runs,
+                            recent_failed, recent_checked_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                        (build_id, test_name, escapes.ESCAPED, 4, 0, 10,
+                         self.RANKED_FAILED_AFTER[test_name] if worst else 1,
+                         LANDED_AT + self.RANKED_LANDED[test_name],
+                         LANDED_AT + escapes.ESCAPE_WINDOW_SECONDS, LANDED_AT,
+                         100 if worst else None,
+                         self.RANKED_RECENT_FAILED[test_name] if worst else None,
+                         LANDED_AT if worst else None),
+                    )
+        return {
+            'test': sorted(self.RANKED_CONVICTIONS),
+            'convictions': self._ascending(self.RANKED_CONVICTIONS),
+            'queues': self._ascending(self.RANKED_QUEUES),
+            'landed': self._ascending(self.RANKED_LANDED),
+            'increase': self._ascending(self.RANKED_FAILED_AFTER),
+            'damage': self._ascending(self.RANKED_RECENT_FAILED),
+        }
+
+    @staticmethod
+    def _ascending(ranking: dict) -> list:
+        return [test_name for test_name, _ in sorted(ranking.items(), key=lambda pair: pair[1])]
 
     def test_a_page_reports_the_whole_set_it_was_taken_from(self) -> None:
         self._convict_many(5)
@@ -1204,13 +1498,19 @@ class TestListingPages(fixtures.DatabaseTest):
         self.assertEqual((first.first, first.last, first.remaining), (1, 2, 3))
         self.assertTrue(first.truncated)
 
+    def test_the_total_counts_groups_and_not_the_convictions_inside_them(self) -> None:
+        """Counting rows would page over a set three times the size of the one the table shows, so the
+        last pages would be empty and the remainder would be a number nothing reaches."""
+        self._convict_many(5, convictions_each=3)
+        self.assertEqual(self._page(1).total, 5)
+
     def test_every_row_is_reachable_across_the_pages_and_none_is_reached_twice(self) -> None:
         """The point of a total order behind LIMIT/OFFSET: a partial one drops a row from one page
         and repeats it on the next."""
         self._convict_many(5)
         seen = []
         for number in range(1, 4):
-            seen.extend(one.test_name for one in self._page(number).convictions)
+            seen.extend(one.test_name for one in self._page(number).tests)
         self.assertEqual(len(seen), 5)
         self.assertEqual(len(set(seen)), 5)
 
@@ -1248,6 +1548,28 @@ class TestListingPages(fixtures.DatabaseTest):
         self._convict_many(3)
         self.assertEqual(self._page(1, limit=0).shown, 1)
 
+    def test_every_sortable_aggregate_is_selected_under_the_name_it_is_ordered_by(self) -> None:
+        """An aggregate orders by its output alias, so a registered column left out of the row query's
+        SELECT would make a reader's sort an sqlite error. The SELECT is built from the registry for
+        exactly this reason; this is the check that says so.
+
+        Asserted against the RENDERED rows and their order. It used to assert the page's `total`, which
+        comes off a count subquery no ORDER BY reaches — so it proved only that no exception was raised,
+        and every column's order went unread. `_distinctly_ranked` gives each column a different
+        permutation of the three tests, so a sort that reached the wrong column changes the answer.
+        """
+        expected = self._distinctly_ranked()
+        for name in filters.ESCAPES.sortable_names:
+            for descending in (True, False):
+                keys = filters.sort_keys(filters.ESCAPES, ((name, descending),))
+                page = escapes.answered_tests(self.connection, fixtures.DEFAULT_BUILD_TIME - DAY,
+                                              fixtures.DEFAULT_BUILD_TIME + DAY, escapes.ESCAPED,
+                                              sort_keys=keys)
+                ascending = expected[name]
+                wanted = list(reversed(ascending)) if descending else ascending
+                self.assertEqual([one.test_name for one in page.tests], wanted,
+                                 f'{name}:{descending}')
+
 
 class TestMergedEscapeCategory(fixtures.DatabaseTest):
     """ESCAPED and FAILS_ON_MAIN as one listed bucket, with the baseline demoted to a split.
@@ -1284,9 +1606,9 @@ class TestMergedEscapeCategory(fixtures.DatabaseTest):
                                             fixtures.DEFAULT_BUILD_TIME + DAY)
 
     def _names(self, category: str, conditions: tuple = ()) -> list:
-        return [one.test_name for one in escapes.convictions(
+        return [one.test_name for one in escapes.answered_tests(
             self.connection, fixtures.DEFAULT_BUILD_TIME - DAY, fixtures.DEFAULT_BUILD_TIME + DAY,
-            escapes.category_verdicts(category), conditions=conditions).convictions]
+            escapes.category_verdicts(category), conditions=conditions).tests]
 
     def test_the_listed_categories_partition_every_stored_verdict_exactly_once(self) -> None:
         """A verdict in no category would vanish from the pane, and one in two would be counted

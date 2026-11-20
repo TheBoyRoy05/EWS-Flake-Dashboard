@@ -108,32 +108,43 @@ class TestRegistry(unittest.TestCase):
 
 # The literal expression each escapes column stands for, repeated here rather than read off the
 # registry for the same reason the tests table's are: an expression that changed under the registry
-# has to fail a test somewhere. Rate increase and damage are the registered sqlite functions scaled to
-# the percentage the page prints, so a reader filters against the number in the cell.
+# has to fail a test somewhere. A row is one test, so most of these are the reduction the cell shows,
+# and rate increase and damage are the registered sqlite function and aggregate scaled to the
+# percentage the page prints, so a reader filters against the number in the cell.
 ESCAPE_EXPRESSIONS = {
     'test': 'outcome.test_name',
     'rule': 'verdict.rule',
     'queue': 'build.builder',
     'verdict': 'outcome.verdict',
-    'landed': 'outcome.landed_at',
-    'increase': ('escape_rate_increase(outcome.runs_before, outcome.failed_before, '
-                 'outcome.runs_after, outcome.failed_after) * 100'),
-    'damage': 'escape_damage(outcome.recent_runs, outcome.recent_failed) * 100',
-    'runs_after': 'outcome.runs_after',
-    'failed_after': 'outcome.failed_after',
+    'convictions': 'COUNT(*)',
+    'landed': 'MIN(outcome.landed_at)',
+    'increase': ('MAX(escape_rate_increase(outcome.runs_before, outcome.failed_before, '
+                 'outcome.runs_after, outcome.failed_after) * 100)'),
+    'damage': ('escape_current_damage(outcome.recent_checked_at, outcome.recent_runs, '
+               'outcome.recent_failed) * 100'),
 }
 
 # Which escapes columns a reader may order by. The three category names are deliberately absent:
 # ordering a table by a bucket name ships a ranking the alphabet invented — TREE_DIVERGED before
 # ESCAPED is not a severity — which is the judgment TESTS already makes for `rule`, `queue`, `suite`.
-ESCAPE_SORTABLE = {'test', 'landed', 'increase', 'damage', 'runs_after', 'failed_after'}
+ESCAPE_SORTABLE = {'test', 'convictions', 'landed', 'increase', 'damage'}
 
 # The escapes columns whose NULL means no evidence was gathered rather than a low value.
-ESCAPE_NULLS_LAST = {'landed', 'increase', 'damage'}
+ESCAPE_NULLABLE = {'landed', 'increase', 'damage'}
+
+# The escapes columns that describe the GROUP a row shows rather than one conviction inside it, so a
+# clause on one belongs in HAVING and a clause on the rest in WHERE.
+ESCAPE_AGGREGATES = {'convictions', 'landed', 'increase', 'damage'}
+
+# The operators the escapes listing has no column for at all, and what each was retired with. The two
+# counts either side of the landing were `MAX()`ed independently, so a group could offer a pair no
+# conviction produced and the listing printed neither figure to check it against. `queues` went for
+# the width: one queue convicted 135 of 157 tests, and the drilldown names each queue anyway.
+ESCAPE_ABSENT_COLUMNS = {'runs_after', 'failed_after', 'queues'}
 
 
 class TestEscapesRegistry(unittest.TestCase):
-    """The escapes listing's vocabulary, which is one row per (build, test) and never grouped."""
+    """The escapes listing's vocabulary, which is one row per TEST inside the open verdict category."""
 
     def test_every_column_stands_for_the_expression_it_is_registered_with(self) -> None:
         self.assertEqual({name: column.expression
@@ -142,41 +153,98 @@ class TestEscapesRegistry(unittest.TestCase):
 
     def test_the_two_derived_columns_call_the_functions_the_page_derives_them_with(self) -> None:
         """Not a stored column and not the Newcombe formula re-spelled in SQL: one definition,
-        called from the order and printed in the cell, so the two cannot disagree."""
+        called from the order and printed in the cell, so the two cannot disagree. Damage is the
+        registered AGGREGATE, since a grouped row's damage is the one at the group's latest check and
+        no reduction of the per-conviction function would say that."""
         self.assertIn(f'{config.ESCAPE_INCREASE_FUNCTION}(',
                       filters.ESCAPES.columns['increase'].expression)
-        self.assertIn(f'{config.ESCAPE_DAMAGE_FUNCTION}(',
+        self.assertIn(f'{config.ESCAPE_CURRENT_DAMAGE_FUNCTION}(',
                       filters.ESCAPES.columns['damage'].expression)
 
-    def test_no_column_groups_so_a_clause_can_never_need_a_having(self) -> None:
-        """This query has no GROUP BY, and a HAVING attached to it would read over the whole result as
-        one group. Nothing in the registry can produce one: no aggregate column, and no ENUM_SET
-        column to bring a `grouped` operator with it."""
-        for column in filters.ESCAPES.columns.values():
-            self.assertFalse(column.aggregate, column.name)
-            self.assertNotEqual(column.kind, filters.ENUM_SET, column.name)
-        for column in filters.ESCAPES.columns.values():
-            for operator in column.operators.values():
-                self.assertFalse(operator.grouped, f'{column.name}:{operator.name}')
+    def test_the_increase_column_wraps_the_one_per_conviction_spelling(self) -> None:
+        """Two spellings of one call is two places for its arguments to drift, and
+        `analysis.escapes` needs the unwrapped form for the aggregate that names which conviction
+        supplied the maximum."""
+        self.assertEqual(filters.ESCAPES.columns['increase'].expression,
+                         f'MAX({filters.ESCAPE_INCREASE} * 100)')
+
+    def test_a_group_column_narrows_in_having_and_a_conviction_column_in_where(self) -> None:
+        """Which half of the query a clause lands in is the registry's answer, and it is the whole
+        difference between "this test has a conviction on that queue" and "this test's group is worse
+        than that": a HAVING over the group, a WHERE over the convictions it is built from."""
+        for name, column in filters.ESCAPES.columns.items():
+            self.assertEqual(column.aggregate, name in ESCAPE_AGGREGATES, name)
+        grouped = filters.condition(filters.ESCAPES, 'increase', 'ge', '50')
+        per_conviction = filters.condition(filters.ESCAPES, 'verdict', 'eq', config.ESCAPED)
+        where, having, _ = filters.clause((grouped, per_conviction))
+        self.assertIn('outcome.verdict', where)
+        self.assertIn('MAX(', having)
+
+    def test_the_rule_column_is_the_distinct_set_a_grouped_row_shows(self) -> None:
+        """A row carries every rule that convicted the test, so the operators are the set ones, which
+        `clause` answers in HAVING — the same shape `/tests` already uses for its own rule column."""
+        rule = filters.ESCAPES.columns['rule']
+        self.assertEqual(rule.kind, filters.ENUM_SET)
+        self.assertTrue(all(operator.grouped for operator in rule.operators.values()
+                           if operator.template))
+
+    def test_the_rule_column_deliberately_no_longer_answers_the_per_conviction_equality(self) -> None:
+        """Retiring `eq`/`ne`/`in`/`notin` here is the grouping, not an oversight: `eq` asked about one
+        conviction, and over a group of them that one question is two. `anyof` on a single value is
+        "some conviction carries that rule" and `exactly` on a single value is "that is the only rule
+        the group carries", so a reader keeps both readings and neither is spelled `eq`."""
+        for retired in ('eq', 'ne', 'in', 'notin'):
+            self.assertIsNone(filters.condition(filters.ESCAPES, 'rule', retired,
+                                                config.CLEAN_TREE), retired)
+        for kept in ('anyof', 'exactly'):
+            self.assertIsNotNone(filters.condition(filters.ESCAPES, 'rule', kept,
+                                                   config.CLEAN_TREE), kept)
+
+    def test_neither_after_the_landing_count_nor_the_queue_count_is_a_column_of_this_table(self) -> None:
+        """The after-counts were two independent `MAX()`es over the group, so a group holding (100 runs,
+        1 failure) and (10 runs, 9 failures) offered the pair (100, 9) no conviction produced — and
+        `failed_after:ge:5` with `runs_after:le:20` then matched a group no single conviction satisfied.
+        The listing prints none of these three, so a reader could not see what they were filtering by;
+        one conviction's pair and its queue are in that conviction's own drilldown row."""
+        for name in ESCAPE_ABSENT_COLUMNS:
+            self.assertIsNone(filters.ESCAPES.column(name), name)
+            self.assertIsNone(filters.condition(filters.ESCAPES, name, 'ge', '5'), name)
 
     def test_only_the_columns_that_carry_no_grade_of_their_own_are_sortable(self) -> None:
         self.assertEqual(set(filters.ESCAPES.sortable_names), ESCAPE_SORTABLE)
 
     def test_rates_and_times_descend_first_and_a_test_name_ascends_first(self) -> None:
         self.assertFalse(filters.ESCAPES.columns['test'].descending_first)
-        for name in ('landed', 'increase', 'damage', 'runs_after', 'failed_after'):
+        for name in ('convictions', 'landed', 'increase', 'damage'):
             self.assertTrue(filters.ESCAPES.columns[name].descending_first, name)
 
     def test_a_column_whose_null_means_no_evidence_sorts_those_rows_last(self) -> None:
         self.assertEqual({name for name, column in filters.ESCAPES.columns.items()
-                          if column.nulls_last}, ESCAPE_NULLS_LAST)
+                          if column.nullable}, ESCAPE_NULLABLE)
 
-    def test_the_tiebreak_is_the_table_s_primary_key(self) -> None:
-        """escape_verdicts is keyed on (build_id, test_name), and this listing pages with
-        LIMIT/OFFSET: an order that is not total drops a row from one page and repeats it on the
-        next."""
-        self.assertEqual(filters.ESCAPES.tiebreak,
-                         'outcome.build_id DESC, outcome.test_name ASC')
+    def test_a_nullable_aggregate_keeps_the_operators_that_ask_for_exactly_those_rows(self) -> None:
+        """Each of these three is NULL precisely because nothing was measured, which is why it is
+        `nullable` at all — so "which tests has nobody asked main about" is `damage:unset`, and stripping
+        presence from every aggregate took that question away on the false ground that an aggregate is
+        never NULL over a group."""
+        for name in ESCAPE_NULLABLE:
+            column = filters.ESCAPES.columns[name]
+            self.assertLessEqual({'set', 'unset'}, set(column.operators), name)
+            each = filters.condition(filters.ESCAPES, name, 'unset')
+            self.assertIsNotNone(each, name)
+            _, having, parameters = filters.clause((each,))
+            self.assertEqual(having, f'{column.expression} IS NULL', name)
+            self.assertEqual(parameters, {}, name)
+
+    def test_an_aggregate_that_cannot_be_null_over_a_group_offers_no_presence_operator(self) -> None:
+        for name in ESCAPE_AGGREGATES - ESCAPE_NULLABLE:
+            self.assertFalse({'set', 'unset'} & set(filters.ESCAPES.columns[name].operators), name)
+
+    def test_the_tiebreak_is_the_group_key(self) -> None:
+        """A row is one test and this listing pages with LIMIT/OFFSET: an order that is not total
+        drops a row from one page and repeats it on the next, and the test name is what makes any
+        order over groups total."""
+        self.assertEqual(filters.ESCAPES.tiebreak, 'outcome.test_name ASC')
 
     def test_the_verdict_vocabulary_is_the_one_the_escape_checker_decides_into(self) -> None:
         self.assertEqual(filters.ESCAPES.columns['verdict'].vocabulary, config.ESCAPE_VERDICTS)
@@ -186,9 +254,10 @@ class TestEscapesRegistry(unittest.TestCase):
         self.assertIsNotNone(filters.condition(filters.ESCAPES, 'verdict', 'eq', config.ESCAPED))
 
     def test_a_tests_column_is_not_reachable_through_the_escapes_table(self) -> None:
-        """Two registries, not one with a union of both pages' columns: `convictions` and `queues`
-        are aggregates of a grouped query this one does not run."""
-        for name in ('convictions', 'queues', 'last_seen', 'suite', 'pr'):
+        """Two registries, not one with a union of both pages' columns: both tables now group, and
+        they group different things — `last_seen` is a convicted-test figure this page does not
+        carry."""
+        for name in ('last_seen', 'suite', 'pr'):
             self.assertIsNone(filters.ESCAPES.column(name), name)
 
 
@@ -201,16 +270,19 @@ class TestNullPlacement(unittest.TestCase):
         self.assertEqual(len(keys), 1, specification)
         return keys[0].sql
 
-    def test_a_nulls_last_column_pushes_them_last_in_both_directions(self) -> None:
-        expression = ESCAPE_EXPRESSIONS['increase']
+    def test_a_nullable_column_pushes_its_nulls_last_in_both_directions(self) -> None:
         self.assertEqual(self._sql(filters.ESCAPES, 'increase:desc'),
-                         f'{expression} IS NULL ASC, {expression} DESC')
+                         'increase IS NULL ASC, increase DESC')
         self.assertEqual(self._sql(filters.ESCAPES, 'increase:asc'),
-                         f'{expression} IS NULL ASC, {expression} ASC')
+                         'increase IS NULL ASC, increase ASC')
 
-    def test_an_ordinary_column_emits_the_plain_term(self) -> None:
-        self.assertEqual(self._sql(filters.ESCAPES, 'runs_after:desc'),
-                         'outcome.runs_after DESC')
+    def test_an_aggregate_orders_by_its_output_alias_and_an_ordinary_column_by_its_expression(self) \
+            -> None:
+        """An aggregate cannot be spelled again in the ORDER BY of the query that counts groups
+        without any aggregate in scope, so `order_expression` is the alias the row query selects it
+        under — which is why `escapes.answered_tests` builds that SELECT from this registry."""
+        self.assertEqual(self._sql(filters.ESCAPES, 'convictions:desc'), 'convictions DESC')
+        self.assertEqual(self._sql(filters.ESCAPES, 'test:asc'), 'outcome.test_name ASC')
         self.assertEqual(self._sql(filters.TESTS, 'last_seen:asc'), 'last_seen ASC')
 
     def test_the_null_term_stays_inside_the_key_order_by_dedupes(self) -> None:
@@ -234,8 +306,10 @@ class TestEscapesInjection(unittest.TestCase):
                 if each is None:
                     continue
                 where, having, parameters = filters.clause((each,))
-                self.assertEqual(having, '', f'{name}:{operator_name}')
+                # One half or the other, never both, and the payload in neither: an aggregate column
+                # and a set operator land in HAVING, everything else in WHERE.
                 self.assertNotIn('DROP', where, f'{name}:{operator_name}')
+                self.assertNotIn('DROP', having, f'{name}:{operator_name}')
                 if operator_name in VALUELESS:
                     self.assertEqual(parameters, {})
                     continue
@@ -274,11 +348,11 @@ class TestEscapesRequested(unittest.TestCase):
 
     def test_a_clause_this_table_cannot_read_is_reported_rather_than_applied(self) -> None:
         asked = filters.requested(MultiDict([
-            (self.ESCAPE_FILTER, 'convictions:gt:2'),
+            (self.ESCAPE_FILTER, 'last_seen:gt:2'),
             (self.ESCAPE_SORT, 'verdict:desc'),
             (self.ESCAPE_FILTER, 'test:has:webgl'),
         ]), filters.ESCAPES)
-        self.assertEqual(asked.rejected, ('convictions:gt:2', 'verdict:desc'))
+        self.assertEqual(asked.rejected, ('last_seen:gt:2', 'verdict:desc'))
         self.assertEqual([condition.column.name for condition in asked.conditions], ['test'])
 
     def test_a_sort_naming_no_direction_reads_the_way_its_column_reads_first(self) -> None:

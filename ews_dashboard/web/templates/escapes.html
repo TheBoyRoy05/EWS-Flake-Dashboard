@@ -5,17 +5,23 @@
 
 {% block content %}
 {# Everything a link has to keep hold of to leave the page reading as it did: the verdict category
-   the pane has open, the queue scope, and the listing's own filters and sorts. Not a clause that did
-   not parse, which is not part of what the page is showing, and not `page`: a reader who changes the
-   window, the scope or the category is looking at a different set, and carrying page 3 into it would
-   answer with the end of a set they have not seen the start of. #}
-{% set filter_args = {filter_argument: asked.filter_clauses, sort_argument: asked.sort_clauses, 'verdict': verdict_shown, 'family': family, 'group': group, 'version': version, 'builder': builder} %}
+   the pane has open, the queue scope, the test whose convictions are open beside the table, and the
+   listing's own filters and sorts. Not a clause that did not parse, which is not part of what the page
+   is showing, and not `page`: a reader who changes the window, the scope or the category is looking at
+   a different set, and carrying page 3 into it would answer with the end of a set they have not seen
+   the start of. #}
+{% set filter_args = {filter_argument: asked.filter_clauses, sort_argument: asked.sort_clauses, 'verdict': verdict_shown, 'test': test_filter, 'family': family, 'group': group, 'version': version, 'builder': builder} %}
+{# The same, plus the one argument that policy drops on purpose and two links need back: the page the
+   listing is on. Opening or closing a row beside the table must not send the reader to page 1 of a
+   listing they were reading page 3 of, and neither link changes which set is paged. #}
+{% set row_args = dict(filter_args, **({page_argument: listed.number} if listed.number > 1 else {})) %}
 {# Every form on this page carries the window, category and scope it is not editing, since a GET form
    sends its own fields and nothing else. `page` is deliberately absent for the reason above. #}
 {% macro held_fields(include_queue=True) %}
 <input type="hidden" name="days" value="{{ window.days }}">
 {%- if suite %}<input type="hidden" name="suite" value="{{ suite }}">{% endif %}
 {%- if verdict_shown %}<input type="hidden" name="verdict" value="{{ verdict_shown }}">{% endif %}
+{%- if test_filter %}<input type="hidden" name="test" value="{{ test_filter }}">{% endif %}
 {%- for clause in asked.filter_clauses %}<input type="hidden" name="{{ filter_argument }}" value="{{ clause }}">{% endfor %}
 {%- for clause in asked.sort_clauses %}<input type="hidden" name="{{ sort_argument }}" value="{{ clause }}">{% endfor %}
 {%- if include_queue %}
@@ -29,11 +35,14 @@
    hand-edited one and a script that never loads. A heading names one key, so following one replaces
    the order rather than pushing the current key down into a secondary; two keys at once are what the
    filter surface and the query string are for. A heading link drops `page`, since row 201 of one
-   order is not row 201 of another. #}
-{% macro sort_header(key, label, classes='') %}
+   order is not row 201 of another. `title` is where a grouped column says which reduction it is: the
+   label is the figure's name and the reduction is the thing a reader would otherwise assume wrongly.
+   The direction is `aria-sort` on the heading and the glyph is `aria-hidden`: with the arrow inside the
+   link the accessible name of the control read "Rate increase▾", which is not the name of anything. #}
+{% macro sort_header(key, label, classes='', title='') %}
 {%- set active = sort == key %}
 {%- set flipped = (not descending) if active else descending_first[key] %}
-<th class="sortable{{ ' ' ~ classes if classes }}{{ ' sorted' if active }}"><a href="{{ url_for('escaped_regressions', days=window.days, suite=suite, **dict(filter_args, **{sort_argument: key ~ ':' ~ ('desc' if flipped else 'asc')})) }}#convictions">{{ label }}{% if active %}<span class="arrow">{{ '▾' if descending else '▴' }}</span>{% endif %}</a></th>
+<th class="sortable{{ ' ' ~ classes if classes }}{{ ' sorted' if active }}" scope="col" aria-sort="{{ ('descending' if descending else 'ascending') if active else 'none' }}"{{ (' title="' ~ title ~ '"') | safe if title }}><a href="{{ url_for('escaped_regressions', days=window.days, suite=suite, **dict(filter_args, **{sort_argument: key ~ ':' ~ ('desc' if flipped else 'asc')})) }}#convictions">{{ label }}</a>{% if active %}<span class="arrow" aria-hidden="true">{{ '▾' if descending else '▴' }}</span>{% endif %}</th>
 {%- endmacro %}
 {# One page of a set, described by the server that took it: how many of how many, how many are left,
    and the order they are in. The remainder is said out loud because a table that stops at its page
@@ -72,74 +81,65 @@
   </div>
 </div>
 
-<div class="row metrics">
-  <div class="col-4 metric">
-    <div class="text tiny label">Strong escapes</div>
-    <span class="value">{{ subcategories.significant_rate_pct(tally.decided) | percent }}</span>
-    <span class="text tiny denominator">{{ subcategories.significant | count }} of {{ tally.decided | count }} convictions main answered, on {{ subcategories.significant_tests | count }} distinct tests</span>
-  </div>
-  <div class="col-4 metric">
-    <div class="text tiny label">Convictions main answered nothing about</div>
-    <span class="value">{{ tally.undecided | count }}</span>
-    <span class="text tiny denominator">no runs, no baseline, or a moved head</span>
-  </div>
-  <div class="col-4 metric">
-    <div class="text tiny label">Convictions main could not be asked</div>
-    <span class="value">{{ tally.unasked | count }}</span>
-    <span class="text tiny denominator">{{ tally.unaskable['not_landed'] | count }} not landed, {{ tally.unaskable['ambiguous'] | count }} ambiguous, {{ tally.unaskable['unresolved'] | count }} not looked for</span>
-  </div>
-</div>
-
-<div class="panes">
-  <div class="pane categories">
-    <div class="head">
-      <span class="name">What main said</span>
-      <span class="tally">{{ tally.asked | count }} convictions</span>
-    </div>
-    <div class="body">
+{# The verdict categories, a chip row ABOVE the two tables rather than a 300px rail beside them: a row
+   holding the rail plus both tables needed about 1730px of pane and a laptop has 1200, so the rail was
+   what stopped the drilldown ever sitting beside the listing. They read the way the page header's
+   window and suite choosers read — a label, then one pill per choice, the chosen one marked — because
+   a category is the same kind of control. Each chip IS the verdict pill the listing's head and the
+   splits below already wear, `.state` and its `state-*` colour reused rather than a third style
+   invented. The chosen chip is marked by a ring and a weight rather than by a fill, since the fill is
+   already spent saying what main said; `aria-current` carries the same fact to a reader who hears the
+   page. Every chip is a plain link, so the strip needs no script. #}
+<div class="section category-strip">
+  <div class="header">
+    <span class="title">What main said</span>
+    <span class="tally">{{ tally.asked | count }} convictions</span>
+    <div class="chooser start category-chips">
       {% for category in categories %}
-      <a class="entry{{ ' selected' if category == verdict_shown }}" title="{{ verdict_descriptions[category] }}" href="{{ url_for('escaped_regressions', days=window.days, suite=suite, **dict(filter_args, verdict=category)) }}">
-        <span class="line">
-          <span class="label"><span class="state {{ category | state_class }}">{{ category }}</span></span>
-          <span class="tally">{{ category_counts[category] | count }}</span>
-        </span>
-      </a>
-      {% if category == escaped_verdict and subcategories.total %}
-      <div class="subcategories">
-        <span class="split text tiny" title="One landed regression makes a fresh conviction on every later pull request whose build trips the same test, so these convictions count more loudly than the regressions behind them.">these convictions name</span>
-        <span class="line text tiny"><span class="label">distinct tests</span><span class="tally">{{ subcategories.distinct_tests | count }}</span></span>
-        <span class="split text tiny">and before the landing main</span>
+      <a class="state {{ category | state_class }} category-chip{{ ' chosen' if category == verdict_shown }}"{{ ' aria-current="true"' | safe if category == verdict_shown }} title="{{ verdict_descriptions[category] }}" href="{{ url_for('escaped_regressions', days=window.days, suite=suite, **dict(filter_args, verdict=category)) }}">{{ category }}<span class="tally">{{ category_counts[category] | count }}</span></a>
+      {% endfor %}
+      {% if tally.unrecognised %}
+      <span class="state state-unknown category-chip" title="Stored under verdict names this dashboard no longer has a bucket for: {{ tally.unrecognised | join(', ') }}. They are counted in the total beside the title but in none of the categories, and no rate is taken over them. Run scripts/migrate_verdict_names.py to fold them into the category that replaced them.">unrecognised<span class="tally">{{ tally.unrecognised_total | count }}</span></span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="content strip-body">
+    <div class="strip-figures">
+      <div class="figure"><span class="value">{{ subcategories.significant_tests | count }}</span><span class="text tiny label">Tests with a strong escape</span></div>
+      <div class="figure"><span class="value">{{ subcategories.significant_rate_pct(tally.decided) | percent }}</span><span class="text tiny label">Strong escapes, of {{ tally.decided | count }} convictions main answered</span></div>
+    </div>
+    {% if subcategories.total %}
+    <div class="subcategories">
+      <div class="split-group">
+        <span class="split text tiny">before the landing main</span>
         <span class="line text tiny" title="Stored as ESCAPED: main ran the test before the landing and never failed it."><span class="label">was not failing it</span><span class="tally">{{ subcategories.baseline_clean | count }}</span></span>
         <span class="line text tiny" title="Stored as FAILS_ON_MAIN: main had already failed the test before the landing, at any rate at all. One failure in a long clean baseline is enough to land here, which is why this is a split under the bucket and no longer a bucket of its own."><span class="label">was already failing it</span><span class="tally">{{ subcategories.baseline_failing | count }}</span></span>
+      </div>
+      <div class="split-group">
         <span class="split text tiny">of those, main now</span>
         <span class="line text tiny"><span class="label">still failing it</span><span class="tally">{{ subcategories.still_failing | count }}</span></span>
         <span class="line text tiny"><span class="label">has stopped failing it</span><span class="tally">{{ subcategories.recovered | count }}</span></span>
         <span class="line text tiny" title="Main ran the test no times in the last {{ currency_days }} days, so it has demonstrated neither the failure nor a recovery."><span class="label">has not run it lately</span><span class="tally">{{ subcategories.not_run_lately | count }}</span></span>
         <span class="line text tiny" title="Nothing has asked main about these since the verdict was reached, so they are neither still failing nor recovered."><span class="label">not checked yet</span><span class="tally">{{ subcategories.unchecked | count }}</span></span>
-        {# The one number this pane exists to surface, so it carries the same red `state` pill the
-           ESCAPED bucket above it does — an existing class reused rather than a new one, and the same
-           colour for the same claim. The other lines stay plain, which is what makes this one read as
-           the answer and them as the detail behind it. #}
+      </div>
+      {# The one number this strip exists to surface, so it carries the same red `state` pill the
+         ESCAPED chip above it does — an existing class reused rather than a new one, and the same
+         colour for the same claim. The other lines stay plain, which is what makes this one read as
+         the answer and them as the detail behind it. #}
+      <div class="split-group">
         <span class="split text tiny">and the rate increase is</span>
         <span class="line pill-line text tiny" title="The rise after the landing is larger than the evidence could explain by chance, at alpha {{ '%.2f' | format(significance_alpha) }}. STRONG no longer means a share of the runs after the landing failing."><span class="label"><span class="state {{ escaped_verdict | state_class }}">STRONG</span></span><span class="tally">{{ subcategories.significant | count }}</span></span>
         <span class="line pill-line text tiny" title="The rise is not distinguishable from chance. Not the same as no failures: main did fail the test after the landing, and nobody has shown the landing raised the rate."><span class="label"><span class="state state-UNPROVEN">UNPROVEN</span></span><span class="tally">{{ subcategories.not_significant | count }}</span></span>
       </div>
-      {% endif %}
-      {% endfor %}
-      {% if tally.unrecognised %}
-      <div class="entry" title="Stored under verdict names this dashboard no longer has a bucket for: {{ tally.unrecognised | join(', ') }}. They are counted in the total above but in none of the categories, and no rate is taken over them. Run scripts/migrate_verdict_names.py to fold them into the category that replaced them.">
-        <span class="line">
-          <span class="label"><span class="state state-unknown">unrecognised</span></span>
-          <span class="tally">{{ tally.unrecognised_total | count }}</span>
-        </span>
-      </div>
-      {% endif %}
     </div>
+    {% endif %}
   </div>
+</div>
 
+<div class="panes escapes-panes">
   <div class="pane detail" id="convictions">
     <div class="head">
-      <span class="name">Convictions main answered <span class="state {{ verdict_shown | state_class }}">{{ verdict_shown }}</span></span>
+      <span class="name" id="convictions-name">Tests main answered <span class="state {{ verdict_shown | state_class }}">{{ verdict_shown }}</span></span>
       <span class="tally">{{ listing_summary() }}</span>
       {% if asked.narrowing %}<a class="badge" href="{{ url_for('escaped_regressions', days=window.days, suite=suite, **dict(filter_args, **{filter_argument: None})) }}">clear</a>{% endif %}
       {# A details in the head rather than an overlay: a :target overlay has neither an escape key nor
@@ -149,9 +149,14 @@
          `filters.exploded_filter_specifications`/`exploded_sort_specifications` turn them back into
          that string, which is all the route ever hands to `parse`. Every control here is a plain GET
          field: with the script blocked, "+ filter" submits and the server renders the extra chip. #}
-      {%- set filter_active = asked.narrowing or asked.rejected %}
+      {# A chip with no removal link is a row this request has only just added, which is the third
+         reason to render the disclosure open: "+ filter" answered with it closed, so the row it had
+         just added was hidden and the press read as having done nothing. The glyph's count stays the
+         committed clauses, since a half-filled row narrows nothing yet. #}
+      {%- set pending_chips = (filter_chips | rejectattr('removal') | list) + (sort_chips | rejectattr('removal') | list) %}
+      {%- set filter_active = asked.narrowing or asked.rejected or pending_chips %}
       <details class="table-filter"{{ ' open' if filter_active }}>
-        <summary class="{{ 'active' if filter_active }}" aria-label="Filter and sort">⇅{% if filter_active %}{{ asked.filter_clauses | length }}{% endif %}</summary>
+        <summary class="{{ 'active' if filter_active }}" aria-label="Filter and sort">⇅{% if asked.filter_clauses %}{{ asked.filter_clauses | length }}{% endif %}</summary>
         <form class="filter-form chip-form" method="get" action="{{ url_for('escaped_regressions') }}" id="table-filter-form">
           {{ held_fields() }}
           <div class="chip-group">
@@ -231,13 +236,12 @@
         </form>
       </details>
     </div>
-    {% if listed.convictions %}<p class="meaning text tiny">{{ verdict_descriptions[verdict_shown] }}</p>{% endif %}
     <div class="body">
-      {% if not listed.convictions %}
+      {% if not listed.tests %}
       {% if asked.narrowing %}
       <div class="placeholder">No conviction main answered this way matches {{ asked.filter_clauses | join(' and ') }}. The filter is above this table, and clearing it shows the category again.</div>
       {% elif verdict_shown == escaped_verdict %}
-      <div class="placeholder">No conviction in this window escaped: main never started failing a test a conviction had excused. The categories beside this are what main said instead, and a conviction can only be checked once its pull request has landed and bots have run the test on main.</div>
+      <div class="placeholder">No conviction in this window escaped: main never started failing a test a conviction had excused. The categories beside this are what main said instead, and a conviction can only be checked once its pull request has landed and bots have run the test on main.{% if tally.unasked %} Not asked yet: {{ tally.unaskable['not_landed'] | count }} not landed, {{ tally.unaskable['ambiguous'] | count }} ambiguous, {{ tally.unaskable['unresolved'] | count }} not looked for.{% endif %}</div>
       {% else %}
       <div class="placeholder">No conviction in this window was answered this way. Pick another category to see what main said.</div>
       {% endif %}
@@ -249,37 +253,46 @@
          no rate increase it was worse than furniture: it announced an order over a column of em
          dashes, which is a defect to fix rather than to narrate. Those categories now read by landing
          time and do not offer a rate-increase sort at all. #}
-      {# The fourth column is the baseline in the merged escape bucket and a reason everywhere else,
-         so it is headed by what it holds. In the bucket a row's answer is three count pairs — the
-         baseline here, the counts after the landing under Rate increase, the counts main has run
-         lately under Current damage — and the header names the one this column carries rather than
-         asking "Why" over a figure. The other categories print an em dash in both of those cells, so
-         their rows keep a reason, capped at `escapes.REASON_WORDS` words. #}
+      {# A row is one TEST, and every figure on it is a reduction of that test's convictions: the
+         earliest landing, the worst single conviction's rate increase, the damage at the latest
+         currency check. What is NOT here is the three count pairs, because no honest pooling of them
+         exists — a landed regression poisons every later conviction's baseline, and the convictions of
+         one test query overlapping windows on main. They are one conviction at a time in the drilldown,
+         with that conviction's links and, for a category main answered nothing about, its reason. #}
+      {# The two after-the-landing figures are the merged bucket's own columns, so a category that
+         prints neither carries neither header nor cell: the em dash they used to print reserved 266px
+         of a 908px table to say nothing. #}
+      <div class="table-scroll" tabindex="0" role="region" aria-labelledby="convictions-name">
       <table class="table full-width convictions">
-        <thead><tr>{{ sort_header('test', 'Test') }}<th>Rule</th><th>Queue</th>{% if shows_increase %}<th class="numeric" title="Failures of runs on main in the {{ window_days }} days before the landing.">Before</th>{% else %}<th>Why</th>{% endif %}{{ sort_header('landed', 'Landed', 'when') }}<th>Links</th>{% if shows_increase %}{{ sort_header('increase', 'Rate increase', 'numeric') }}{% else %}<th class="numeric">Rate increase</th>{% endif %}{{ sort_header('damage', 'Current damage', 'numeric') }}</tr></thead>
+        <thead><tr>{{ sort_header('test', 'Test') }}<th scope="col">Rule</th>{{ sort_header('convictions', 'Count', 'numeric', 'How many convictions of this test main answered this way. Open the row for them.') }}{{ sort_header('landed', 'Landed', 'when', 'The earliest landing among them.') }}{% if shows_increase %}{{ sort_header('increase', 'Rate increase', 'numeric', 'The worst single conviction of this test, not a statistic over the group.') }}{{ sort_header('damage', 'Current damage', 'numeric', 'At the latest currency check any of these convictions carries.') }}{% endif %}</tr></thead>
         <tbody>
-          {% for conviction in listed.convictions %}
-          <tr>
-            <td><a href="{{ links.test_history(conviction.configuration, conviction.test_name) }}" target="_blank" rel="noopener">{{ conviction.test_name }}</a></td>
-            <td class="text tiny">{{ conviction.rule }}</td>
-            <td class="text tiny">{{ conviction.builder }}</td>
-            <td class="{{ 'numeric ' if conviction.verdict in escape_verdicts }}text tiny">{% if conviction.verdict in escape_verdicts %}{% if conviction.runs_before %}<span class="evidence">{{ conviction.failed_before }}/{{ conviction.runs_before }}</span>{% else %}—{% endif %}{% else %}{{ reason(conviction) }}{% endif %}</td>
-            <td class="when text tiny">{% if conviction.landed_at is none %}Landing time unknown{% else %}{{ conviction.landed_at | moment }}{% endif %}</td>
-            <td class="text tiny links">
-              {# PR first: a reader scanning this column is going to the change, not to the build that
-                 convicted it. Still conditional, and `{% if %}` emits nothing at all when the id is
-                 absent, so a row without a pull request leaves no gap and no empty link — the cell
-                 just starts at Build. All three leave this host, so all three keep target and rel. #}
-              {% if conviction.pr_id %}<a href="{{ links.pull_request(conviction.pr_id) }}" target="_blank" rel="noopener">PR</a>{% endif %}
-              <a href="{{ links.build(conviction.builder_id, conviction.build_number) }}" target="_blank" rel="noopener">Build</a>
-              <a href="{{ links.test_investigation(conviction.configuration, conviction.test_name) }}" target="_blank" rel="noopener">History</a>
+          {% for test in listed.tests %}
+          {%- set open_row = test_filter == test.test_name %}
+          <tr{{ ' class="selected" aria-current="true"' | safe if open_row }}>
+            {# The row's identity, so the four figures beside it and the two links inside it are read
+               against a name rather than as one list of 68 anchors called `history`. `role="rowheader"`
+               rather than `th scope="row"`: `.table th` (dashboard.css:321-339) uppercases its cell,
+               paints it `--faint` and forbids `overflow-wrap`, which shouted every test path and grew
+               the table from 1,150px to 1,298px. The role is what a `th scope="row"` maps to anyway, so
+               a reader hears the same thing; the native element is correct here the moment that rule
+               admits a body header. #}
+            <td role="rowheader">
+              <a href="{{ url_for('escaped_regressions', days=window.days, suite=suite, **dict(row_args, test=[test.test_name])) }}#test-detail">{{ test.test_name | path_breaks }}</a>
+              {# The one link that needs the worst conviction's configuration: a test convicted on
+                 several queues has no single one, and the row's own rate increase came from that
+                 conviction. Outbound, so target and rel, like every other link off this host. #}
+              <a class="text tiny" href="{{ links.test_history(test.configuration, test.test_name) }}" target="_blank" rel="noopener" aria-label="Results history for {{ test.test_name }}">history</a>
             </td>
-            <td class="numeric text tiny">{% if conviction.verdict not in escape_verdicts or conviction.rate_increase is none %}—{% else %}{{ (conviction.rate_increase * 100) | round(1) | percent }}<span class="evidence">{{ conviction.failed_after }}/{{ conviction.runs_after }}</span>{% endif %}</td>
-            <td class="numeric text tiny">{% if conviction.verdict not in escape_verdicts or conviction.damage is none %}—{% else %}{{ (conviction.damage * 100) | round(1) | percent }}<span class="evidence">{{ conviction.recent_failed }}/{{ conviction.recent_runs }}</span>{% endif %}</td>
+            <td class="text tiny">{% for rule in test.rules %}<span title="{{ rule_descriptions[rule] }}">{{ rule }}</span>{{ ', ' if not loop.last }}{% endfor %}</td>
+            <td class="numeric">{{ test.convictions | count }}</td>
+            <td class="when text tiny">{% if test.landed_at is none %}Landing time unknown{% else %}<span title="{{ test.landed_at | clock }}">{{ test.landed_at | day }}</span>{% endif %}</td>
+            {% if shows_increase %}<td class="numeric text tiny">{% if test.rate_increase_pct is none %}—{% else %}{{ test.rate_increase_pct | round(1) | percent }}{% endif %}</td>
+            <td class="numeric text tiny">{% if test.damage_pct is none %}—{% else %}{{ test.damage_pct | round(1) | percent }}{% endif %}</td>{% endif %}
           </tr>
           {% endfor %}
         </tbody>
       </table>
+      </div>
       {# The pager is two ordinary links, so the remainder a page size cuts off is reachable with no
          script at all. Rendered only when there is more than one page, since a single page has
          nowhere to go. #}
@@ -293,6 +306,65 @@
       {% endif %}
     </div>
   </div>
+
+{% if test_filter %}
+{# One test's own convictions, beside the table rather than under it, the way `/tests` opens a
+   convicted test's. Read through the same predicate as the row above it, the reader's own clauses
+   included, so the pane lists exactly the convictions that row's count was taken over. This is where
+   the three count pairs live, one conviction at a time, and where a category main answered nothing
+   about says why in a phrase capped at `escapes.REASON_WORDS` words.
+
+   Two columns are dropped rather than repeated, because this pane is ONE test and a column whose
+   every cell reads the same carries nothing while costing the most width. `queues_listed` is the
+   distinct set: one queue convicted 135 of 157 tests, and its builder name is the longest string
+   here, so printing it 90 times wrapped every row to three lines to say what the head can say once.
+   `damage_listed` is the same argument for a currency check nobody has made: the assess pass only
+   ever asked the clean-baseline half, so a pane of em dashes is common. #}
+{% set queues_listed = drilldown.convictions | map(attribute='builder') | unique | list %}
+{% set damage_listed = drilldown.convictions | rejectattr('damage', 'none') | list %}
+<div class="pane escape-detail" id="test-detail" role="region" aria-labelledby="test-detail-name">
+  <div class="head">
+    {# The pane spans every configuration the test was convicted under, so the title links the
+       unfiltered timeline (`test_investigation`) rather than one configuration's history. That needs a
+       configuration to read the suite off of; the first conviction listed stands in for all of them. #}
+    <span class="name" id="test-detail-name">{{ test_filter | path_breaks }}</span>{% if drilldown.convictions %}<a href="{{ links.test_investigation(drilldown.convictions[0].configuration, test_filter) }}" target="_blank" rel="noopener" class="text tiny history" aria-label="Results history for {{ test_filter }}, every configuration">history</a>{% endif %}
+    <span class="tally">{% if drilldown.truncated %}{{ drilldown.convictions | length | count }} of {{ drilldown.total | count }}{% else %}{{ drilldown.total | count }} conviction{{ '' if drilldown.total == 1 else 's' }}{% endif %}{% if queues_listed | length == 1 %} on {{ queues_listed[0] | queue_label }}{% endif %}</span>
+    <a class="badge" href="{{ url_for('escaped_regressions', days=window.days, suite=suite, **dict(row_args, test=None)) }}">close</a>
+  </div>
+  <div class="body">
+    {% if not drilldown.convictions %}
+    <div class="placeholder">No conviction of this test is in the open category.</div>
+    {% else %}
+    <div class="table-scroll" tabindex="0" role="region" aria-labelledby="test-detail-name">
+    <table class="table full-width escape-convictions" aria-labelledby="test-detail-name">
+      <thead><tr>{% if queues_listed | length > 1 %}<th scope="col">Queue</th>{% endif %}<th class="when" scope="col">Landed</th>{% if shows_increase %}<th class="numeric" scope="col" title="Failures of runs on main in the {{ window_days }} days before the landing.">Before</th><th class="numeric" scope="col">Rate increase</th>{% if damage_listed %}<th class="numeric" scope="col">Current damage</th>{% endif %}{% else %}<th scope="col">Why</th>{% endif %}<th scope="col">Links</th></tr></thead>
+      <tbody>
+        {% for conviction in drilldown.convictions %}
+        <tr>
+          {% if queues_listed | length > 1 %}<td class="text tiny" role="rowheader" title="{{ conviction.builder }}">{{ conviction.builder | queue_label }}</td>{% endif %}
+          <td class="when text tiny"{% if queues_listed | length == 1 %} role="rowheader"{% endif %}>{% if conviction.landed_at is none %}Landing time unknown{% else %}<span title="{{ conviction.landed_at | clock }}">{{ conviction.landed_at | day }}</span>{% endif %}</td>
+          <td class="{{ 'numeric ' if shows_increase }}text tiny">{% if shows_increase %}{% if conviction.runs_before %}<span class="evidence">{{ conviction.failed_before }}/{{ conviction.runs_before }}</span>{% else %}—{% endif %}{% else %}{{ reason(conviction) }}{% endif %}</td>
+          {% if shows_increase %}<td class="numeric text tiny">{% if conviction.rate_increase is none %}—{% else %}{{ (conviction.rate_increase * 100) | round(1) | percent }}<span class="evidence">{{ conviction.failed_after }}/{{ conviction.runs_after }}</span>{% endif %}</td>
+          {% if damage_listed %}<td class="numeric text tiny">{% if conviction.damage is none %}—{% else %}{{ (conviction.damage * 100) | round(1) | percent }}<span class="evidence">{{ conviction.recent_failed }}/{{ conviction.recent_runs }}</span>{% endif %}</td>{% endif %}{% endif %}
+          <td class="text tiny links">
+            {# PR first: a reader scanning this column is going to the change, not to the build that
+               convicted it. Still conditional, and `{% if %}` emits nothing at all when the id is
+               absent, so a row without a pull request leaves no gap and no empty link — the cell
+               just starts at Build. All three leave this host, so all three keep target and rel.
+               Each carries what it goes to in its accessible name: eighteen links named `Build` and
+               eighteen named `PR` are one list of identical names read on their own. #}
+            {% if conviction.pr_id %}<a href="{{ links.pull_request(conviction.pr_id) }}" target="_blank" rel="noopener" aria-label="Pull request {{ conviction.pr_id }}">PR</a>{% endif %}
+            <a href="{{ links.build(conviction.builder_id, conviction.build_number) }}" target="_blank" rel="noopener" aria-label="Build {{ conviction.build_number }} on {{ conviction.builder }}">Build</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
 </div>
 
 {# One collapsed block for both jobs a reader opens it for: what a figure means, and what this page

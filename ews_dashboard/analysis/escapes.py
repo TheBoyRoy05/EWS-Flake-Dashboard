@@ -179,12 +179,30 @@ UNAVAILABLE = 'unavailable'
 ESCAPE_WINDOW_SECONDS = config.ESCAPE_WINDOW_DAYS * 86400
 CURRENCY_WINDOW_SECONDS = config.CURRENCY_DAYS * 86400
 
-# One escape is worth reading about individually, so a page of them is long. It is a page size and no
-# longer a cap: `convictions` reports the total it was taken from and which page of it this is, so the
-# remainder is reachable rather than silently cut off at row 200.
+# How many TESTS one page of a category's listing holds. A row is a test rather than a conviction, so
+# 200 rows is a wider reading of the set than it was: the convictions behind one of them are in that
+# test's own drilldown. It is a page size and no longer a cap — `answered_tests` reports the total it
+# was taken from and which page of it this is, so the remainder is reachable.
 ESCAPES_LISTED = 200
 
+# How many of one test's convictions its drilldown lists. A cap, the way `/tests`'s own drilldown caps
+# its list: a test convicted on every later pull request that tripped it has tens of rows, and the
+# pane says when the cap cut them rather than growing without bound.
+DRILLDOWN_LISTED = 200
+
 WINDOW = 'build.started_at >= :since AND build.started_at < :until'
+
+# Every conviction main answered, as every read on this page defines one: a stored verdict, the build
+# it was made in, and the flakiness verdict that made it. `candidates` and `unaskable` already join all
+# three and both require the rule, because a conviction IS a flakiness verdict that HAS a rule — so a
+# read that left the third table or the predicate out counted rows the rest of the page does not, and
+# the head's distinct-test count and the listing's own tally could then disagree over one set.
+CONVICTION_SOURCE = '''FROM escape_verdicts AS outcome
+                JOIN build_verdicts AS build USING (build_id)
+                JOIN latest_flakiness_verdicts AS verdict
+                  ON verdict.build_id = outcome.build_id AND verdict.test_name = outcome.test_name'''
+
+CONVICTED = 'verdict.rule IS NOT NULL'
 
 
 # The one-sided normal deviate the bound below is taken at, derived from the single alpha in `config`
@@ -287,17 +305,94 @@ def damage_for_counts(recent_runs: Optional[int], recent_failed: Optional[int]) 
     return recent_failed / recent_runs
 
 
-# The two derived figures, as sqlite functions, so a column can be ordered and narrowed by exactly
-# the number the page prints. `db.connect` registers these; nothing re-implements either formula in
-# SQL, which is the whole point — a stored or re-spelled rate increase is a second definition that can
-# disagree with the counts shown beside it.
+# The rate increase as a sqlite function, so a column can be ordered and narrowed by exactly the
+# number the page prints. `db.connect` registers it; nothing re-implements the formula in SQL, which is
+# the whole point — a stored or re-spelled rate increase is a second definition that can disagree with
+# the counts shown beside it. `damage_for_counts` is deliberately not registered beside it: the listing
+# groups, so the damage a row shows is the `CurrentDamage` aggregate below, and a drilldown row's own
+# rate is read in Python off `Conviction`.
 #
-# Both return None where their inputs carry no evidence, which arrives in SQL as NULL, so every
-# column built on them orders with `nulls_last` set: a row that answers nothing must not outrank one
-# that does, in either direction.
+# It returns None where its inputs carry no evidence, which arrives in SQL as NULL, so every column
+# built on it is registered `nullable`: a row that answers nothing must not outrank one that does, in
+# either direction.
 SQL_FUNCTIONS = (
     (config.ESCAPE_INCREASE_FUNCTION, 4, rate_increase_for_counts),
-    (config.ESCAPE_DAMAGE_FUNCTION, 2, damage_for_counts),
+)
+
+
+class CurrentDamage:
+    """The damage at a group of convictions' LATEST currency check, as a sqlite aggregate.
+
+    One test's row on the listing collapses several convictions, and each carries its own currency
+    answer asked on its own day. Only the newest of them describes what main is doing with the test
+    now, so this is neither a sum nor a mean of the column: it keeps the counts from the greatest
+    `recent_checked_at` and reads the rate off those through `damage_for_counts`, the same function a
+    single conviction's cell prints.
+
+    Several convictions of one test routinely share a `recent_checked_at` to the second — the assess
+    pass asks about them in one run — and their counts differ, because each asks over its own window.
+    Measured on live data: 30 convictions of one IndexedDB test answered 5 of 100 and 31 answered 4 of
+    176 at the same timestamp. So the tie is broken on the WORSE rate, which is deterministic whatever
+    order sqlite scans the group in; breaking it on arrival order made the figure depend on the query
+    plan. A real rate also beats an answer that came back with no runs at all, since that one is an
+    absence of evidence rather than a lower rate.
+
+    None — SQL NULL — where no conviction in the group has ever been asked, which is the ordinary case
+    for the already-failing half of the merged bucket. A group whose latest check got no runs back is
+    None too, because `damage_for_counts` says so.
+    """
+
+    def __init__(self) -> None:
+        self._best: Optional[tuple] = None
+        self._damage: Optional[float] = None
+
+    def step(self, checked_at: Optional[int], runs: Optional[int],
+             failed: Optional[int]) -> None:
+        if checked_at is None:
+            return
+        damage = damage_for_counts(runs, failed)
+        ranked = (checked_at, damage is not None, damage if damage is not None else 0.0)
+        if self._best is None or ranked > self._best:
+            self._best, self._damage = ranked, damage
+
+    def finalize(self) -> Optional[float]:
+        return self._damage
+
+
+class WorstConviction:
+    """The build id of the conviction supplying a group's largest rate increase, as a sqlite aggregate.
+
+    A grouped row links one test timeline, and a test convicted across several queues has no single
+    configuration to link; the worst conviction's is the one the row's own rate-increase figure came
+    from, so it is the one that matches what the row says.
+
+    A conviction with no bound ranks below every conviction that has one, and the larger build id
+    breaks a tie: a group where nothing has a bound — every category main answered nothing about — then
+    names its newest conviction rather than an arbitrary one, so two renders of a page cannot disagree.
+    """
+
+    def __init__(self) -> None:
+        self._best: Optional[tuple] = None
+
+    @staticmethod
+    def _rank(increase: Optional[float], build_id: int) -> tuple:
+        return (increase is not None, increase if increase is not None else 0.0, build_id)
+
+    def step(self, increase: Optional[float], build_id: int) -> None:
+        ranked = self._rank(increase, build_id)
+        if self._best is None or ranked > self._best[0]:
+            self._best = (ranked, build_id)
+
+    def finalize(self) -> Optional[int]:
+        return None if self._best is None else self._best[1]
+
+
+# The aggregates, registered the same way and for the same reason as the scalars above: a grouped row's
+# figure is derived on read through the Python that defines it, so the column a reader sorts or narrows
+# by is the figure the cell prints.
+SQL_AGGREGATES = (
+    (config.ESCAPE_CURRENT_DAMAGE_FUNCTION, 3, CurrentDamage),
+    (config.ESCAPE_WORST_BUILD_FUNCTION, 2, WorstConviction),
 )
 
 
@@ -798,9 +893,8 @@ def _counted_verdicts(connection: sqlite3.Connection, since: int, until: int,
         row['verdict']: row['convictions']
         for row in connection.execute(
             f'''SELECT outcome.verdict, COUNT(*) AS convictions
-                FROM escape_verdicts AS outcome
-                JOIN build_verdicts AS build USING (build_id)
-                WHERE {WINDOW}{conditions}
+                {CONVICTION_SOURCE}
+                WHERE {CONVICTED} AND {WINDOW}{conditions}
                 GROUP BY outcome.verdict''',
             parameters,
         )
@@ -842,6 +936,29 @@ def _verdict_scope(verdicts: object) -> tuple:
     return f'outcome.verdict IN ({placeholders})', parameters
 
 
+def _conviction_scope(since: int, until: int, verdicts: object, suite: Optional[str] = None,
+                      builders: tuple = (), conditions: tuple = ()) -> tuple:
+    """`(where, having, parameters)` for every read of one category's convictions.
+
+    One expression, three callers: the head's splits, the listing, and the drilldown a row opens. Two
+    spellings of it is how a `queue` clause narrowed a listing row to 15 convictions while the pane
+    beside it still counted the 90 that clause had excluded.
+
+    The HAVING half comes back on its own because only the grouped query can attach it: an aggregate or
+    a set clause describes a whole group, and the drilldown lists the convictions inside one — so the
+    drilldown applies the WHERE half, which is exactly the convictions the row's own count was taken
+    over.
+    """
+    scoping, parameters = _filters(suite, builders)
+    scope, bound = _verdict_scope(verdicts)
+    parameters.update(bound)
+    where, having, clause_parameters = filters.clause(conditions)
+    parameters.update(clause_parameters)
+    parameters.update({'since': since, 'until': until})
+    narrowing = f' AND {where}' if where else ''
+    return f'{scope} AND {CONVICTED} AND {WINDOW}{scoping}{narrowing}', having, parameters
+
+
 def escape_subcategories(connection: sqlite3.Connection, since: int, until: int,
                          suite: Optional[str] = None,
                          builders: tuple = ()) -> Subcategories:
@@ -855,11 +972,13 @@ def escape_subcategories(connection: sqlite3.Connection, since: int, until: int,
     bucket on the page cannot disagree with the sentence a reader opens under it. The baseline split
     reads the stored verdict instead, which is the observation itself rather than a second reading of
     it.
+
+    `distinct_tests` is the count the listing's own tally prints a page of, so it is read through
+    `_conviction_scope` — the one predicate that listing reads through. Counted here from a second query
+    it once used a source of its own, and an `escape_verdicts` row whose flakiness verdict had gone
+    landed in this count and not in that tally.
     """
-    conditions, parameters = _filters(suite, builders)
-    scope, bound = _verdict_scope(MERGED_ESCAPE_VERDICTS)
-    parameters.update(bound)
-    parameters.update({'since': since, 'until': until})
+    where, _, parameters = _conviction_scope(since, until, MERGED_ESCAPE_VERDICTS, suite, builders)
     counted: Counter = Counter()
     tests: set = set()
     significant_tests: set = set()
@@ -868,9 +987,8 @@ def escape_subcategories(connection: sqlite3.Connection, since: int, until: int,
                        outcome.failed_before, outcome.runs_after,
                        outcome.failed_after, outcome.recent_runs, outcome.recent_failed,
                        outcome.recent_checked_at
-                FROM escape_verdicts AS outcome
-                JOIN build_verdicts AS build USING (build_id)
-                WHERE {scope} AND {WINDOW}{conditions}''',
+                {CONVICTION_SOURCE}
+                WHERE {where}''',
             parameters,
     ):
         tests.add(row['test_name'])
@@ -892,27 +1010,73 @@ def escape_subcategories(connection: sqlite3.Connection, since: int, until: int,
 
 
 @dataclass(frozen=True)
-class ConvictionPage:
-    """One page of the convictions behind a verdict's count, and where in the whole set it sits.
+class AnsweredTest:
+    """One test as a row of a category's listing: every conviction of it main answered that way,
+    collapsed into one line.
 
-    `total` is every conviction the query matched, not the page's own length, so a page can say how
-    many remain rather than stopping at its last row and leaving a reader to guess. `offset` is the
-    page's own start after clamping, which is what a link back to this page has to carry: a `page`
-    argument past the end is answered with the last page rather than an empty table, and a reader
-    whose URL said page 9 of 3 must not be handed links built on the 9.
+    Each figure is its own reduction and none of them pools the stored counts. `landed_at` is the
+    earliest landing in the group, `rate_increase_pct` the largest single conviction's bound — the
+    worst landing, not a group statistic — and `damage_pct` the damage at whichever of the group's
+    convictions was checked last.
+
+    The four counts either side of the landing are deliberately not here. A landed regression poisons
+    every later conviction's baseline, so a pooled `failed_before/runs_before` would be a pair no run
+    ever produced, and the convictions of one test query overlapping windows on main, so pooling the
+    after counts double-counts runs. They are in the drilldown, one conviction at a time.
+
+    `configuration` is the worst conviction's, since a test convicted across several queues has no
+    single one, and it is what this row's test-history link is built from.
+    """
+
+    test_name: str
+    rules: tuple
+    convictions: int
+    landed_at: Optional[int]
+    rate_increase_pct: Optional[float]
+    damage_pct: Optional[float]
+    configuration: results.Configuration
+
+
+@dataclass(frozen=True)
+class TestConvictions:
+    """One capped set of a single test's convictions inside one category, for that test's drilldown.
+
+    `total` is every conviction the query matched whether or not the cap kept it, so `truncated` can
+    tell a reader the set was cut without the caller comparing it itself — the same shape
+    `convictions.TestConvictions` already has for the convicted-tests drilldown.
+    """
+
+    convictions: tuple
+    total: int
+    limit: int
+
+    @property
+    def truncated(self) -> bool:
+        return self.total > len(self.convictions)
+
+
+@dataclass(frozen=True)
+class TestPage:
+    """One page of the tests behind a category's conviction count, and where in the whole set it sits.
+
+    `total` is every test the query matched, not the page's own length, so a page can say how many
+    remain rather than stopping at its last row and leaving a reader to guess. `offset` is the page's
+    own start after clamping, which is what a link back to this page has to carry: a `page` argument
+    past the end is answered with the last page rather than an empty table, and a reader whose URL said
+    page 9 of 3 must not be handed links built on the 9.
 
     Indices are 1-based because they are read as prose ("201 to 349 of 349"), and `first`/`last` are
     both 0 on an empty page so neither reads as a row that is not there.
     """
 
-    convictions: list
+    tests: list
     total: int
     limit: int
     offset: int
 
     @property
     def shown(self) -> int:
-        return len(self.convictions)
+        return len(self.tests)
 
     @property
     def truncated(self) -> bool:
@@ -920,7 +1084,7 @@ class ConvictionPage:
 
     @property
     def first(self) -> int:
-        return self.offset + 1 if self.convictions else 0
+        return self.offset + 1 if self.tests else 0
 
     @property
     def last(self) -> int:
@@ -960,54 +1124,151 @@ def _page_offset(total: int, limit: int, page: int) -> int:
     return min(page - 1, (total - 1) // limit) * limit
 
 
-def convictions(connection: sqlite3.Connection, since: int, until: int, verdicts: object,
-                suite: Optional[str] = None, builders: tuple = (),
-                limit: int = ESCAPES_LISTED, page: int = 1, conditions: tuple = (),
-                sort_keys: tuple = ()) -> 'ConvictionPage':
-    """One page of the individual convictions behind one category's count, in the order asked for.
+CONVICTION_COLUMNS = '''outcome.*, verdict.rule, build.builder, build.builder_id,
+                       build.build_number, build.pr_id, build.suite, build.platform,
+                       build.style, build.flavor, build.sha AS tested_sha,
+                       (SELECT newer.sha FROM build_verdicts AS newer
+                         WHERE newer.pr_id = build.pr_id AND newer.sha IS NOT NULL
+                           AND outcome.landed_at IS NOT NULL AND newer.started_at <= outcome.landed_at
+                         ORDER BY newer.started_at DESC, newer.build_id DESC LIMIT 1) AS newest_sha,
+                       (SELECT COUNT(DISTINCT other.sha) FROM build_verdicts AS other
+                         WHERE other.pr_id = build.pr_id AND other.sha IS NOT NULL) AS heads,
+                       (SELECT COUNT(*) FROM build_verdicts AS other
+                         WHERE other.pr_id = build.pr_id) AS builds'''
+
+
+def _grouped_selection() -> str:
+    """Every aggregate column of `filters.ESCAPES`, selected under its own registry name.
+
+    Read off the registry rather than spelled again here, because `filters.order_by` orders an
+    aggregate by its output alias: a column registered sortable and left out of this list would turn a
+    reader's sort into an sqlite error instead of an order.
+    """
+    return ', '.join(f'{column.expression} AS {name}'
+                     for name, column in filters.ESCAPES.columns.items() if column.aggregate)
+
+
+def _configurations(connection: sqlite3.Connection, build_ids: tuple) -> dict:
+    """The configuration of each named build, looked up once for a whole page of grouped rows.
+
+    A second query rather than bare build columns beside `MAX()`: sqlite fills a bare column from the
+    extreme row only while exactly one min/max is in the query, and a reader sorting or narrowing by
+    another aggregate column adds a second one — so the page's test-history links would quietly start
+    naming an arbitrary conviction's configuration.
+    """
+    wanted = tuple(dict.fromkeys(build_id for build_id in build_ids if build_id is not None))
+    if not wanted:
+        return {}
+    binds = {f'build{index}': build_id for index, build_id in enumerate(wanted)}
+    placeholders = ', '.join(f':{bind}' for bind in binds)
+    return {
+        row['build_id']: results.Configuration.of_build(row)
+        for row in connection.execute(
+            f'''SELECT build_id, suite, platform, style, flavor FROM build_verdicts
+                WHERE build_id IN ({placeholders})''',
+            binds,
+        )
+    }
+
+
+def answered_tests(connection: sqlite3.Connection, since: int, until: int, verdicts: object,
+                   suite: Optional[str] = None, builders: tuple = (),
+                   limit: int = ESCAPES_LISTED, page: int = 1, conditions: tuple = (),
+                   sort_keys: tuple = ()) -> 'TestPage':
+    """One page of the tests behind one category's count, one row per test, in the order asked for.
 
     `verdicts` is a tuple of stored verdict names, or one name: the ESCAPED category lists two stored
     verdicts and every other category lists one, and `category_verdicts` is what turns a category into
     the tuple. A reader's own `verdict` clause still applies on top of it, which is how either half of
-    the merged bucket stays reachable on its own.
+    the merged bucket stays reachable on its own. The pane is already scoped to one category, so a test
+    convicted in two of them is a row in each rather than a row graded by a precedence rule.
 
     `conditions` and `sort_keys` come from `filters`, which owns every column name, operator and
     expression a request can reach: nothing a reader typed is spelled into this SQL, only bound to it.
-    The rate-increase and damage columns are ordered and narrowed through the sqlite functions
-    `db.connect` registers from `SQL_FUNCTIONS`, so the figure a page sorts by is the one it prints.
+    Which half of the query a condition lands in is the registry's own answer — a per-conviction column
+    narrows in WHERE, so a test is listed when any of its convictions match, and an aggregate or a set
+    operator narrows in HAVING, over the group the row actually shows.
 
     `page` is a number rather than an offset so the arithmetic lives here, where `limit` is known: a
     caller that computed its own offset against a different limit would page over a set of a size the
-    query never used.
+    query never used. The total counts GROUPS, since a row is a group.
 
-    Every order ends in `filters.ESCAPES.tiebreak`, which is this table's primary key. LIMIT/OFFSET
-    over a partial order drops and duplicates rows across page boundaries, because nothing obliges
-    sqlite to break a tie the same way in two queries.
+    Every order ends in `filters.ESCAPES.tiebreak`, which is the group key and so unique per row.
+    LIMIT/OFFSET over a partial order drops and duplicates rows across page boundaries, because
+    nothing obliges sqlite to break a tie the same way in two queries.
     """
-    scoping, parameters = _filters(suite, builders)
-    where, having, bound = filters.clause(conditions)
-    if having:
-        # No ESCAPES column is an aggregate and none takes a `grouped` operator, so `clause` has
-        # nothing to put here. This query does not group, and a HAVING attached to it would be read
-        # over the whole result as one group; loud rather than silent, for whoever registers the
-        # first aggregate column on this table.
-        raise ValueError('the escapes listing does not group, so it cannot answer a HAVING clause')
-    parameters.update(bound)
-    scope, scope_parameters = _verdict_scope(verdicts)
-    parameters.update(scope_parameters)
-    parameters.update({'since': since, 'until': until})
-    narrowing = f' AND {where}' if where else ''
-    source = f'''FROM escape_verdicts AS outcome
-                JOIN build_verdicts AS build USING (build_id)
-                JOIN latest_flakiness_verdicts AS verdict
-                  ON verdict.build_id = outcome.build_id AND verdict.test_name = outcome.test_name
-                WHERE {scope} AND {WINDOW}{scoping}{narrowing}'''
-    # Counted through the same WHERE as the rows, and without the row query's correlated subqueries,
-    # so the two cannot disagree about the set this page was taken from.
-    total = connection.execute(f'SELECT COUNT(*) {source}', parameters).fetchone()[0]
+    where, having, parameters = _conviction_scope(since, until, verdicts, suite, builders,
+                                                 conditions)
+    grouping = f' HAVING {having}' if having else ''
+    source = f'''{CONVICTION_SOURCE}
+                WHERE {where}
+                GROUP BY outcome.test_name{grouping}'''
+    # Counted through a subquery, because the set this page was taken from is a set of groups and
+    # COUNT(*) beside a GROUP BY counts the rows inside one.
+    total = connection.execute(
+        f'SELECT COUNT(*) FROM (SELECT outcome.test_name {source})', parameters,
+    ).fetchone()[0]
     size = max(1, limit)
     offset = _page_offset(total, size, page)
     parameters.update({'limit': size, 'offset': offset})
+    rows = connection.execute(
+        f'''SELECT outcome.test_name,
+                   GROUP_CONCAT(DISTINCT verdict.rule) AS rules,
+                   {_grouped_selection()},
+                   {config.ESCAPE_WORST_BUILD_FUNCTION}({filters.ESCAPE_INCREASE},
+                                                        outcome.build_id) AS worst_build
+            {source}
+            ORDER BY {filters.order_by(filters.ESCAPES, sort_keys)}
+            LIMIT :limit OFFSET :offset''',
+        parameters,
+    ).fetchall()
+    configurations = _configurations(connection, tuple(row['worst_build'] for row in rows))
+    return TestPage(
+        tests=[
+            AnsweredTest(
+                test_name=row['test_name'],
+                rules=tuple(sorted(row['rules'].split(','))) if row['rules'] else (),
+                convictions=row['convictions'],
+                landed_at=row['landed'],
+                rate_increase_pct=row['increase'],
+                damage_pct=row['damage'],
+                configuration=configurations[row['worst_build']],
+            )
+            for row in rows
+        ],
+        total=total,
+        limit=size,
+        offset=offset,
+    )
+
+
+def test_convictions(connection: sqlite3.Connection, since: int, until: int, verdicts: object,
+                     test_name: str, suite: Optional[str] = None, builders: tuple = (),
+                     conditions: tuple = (), limit: int = DRILLDOWN_LISTED) -> 'TestConvictions':
+    """Every conviction of one test inside one category, newest landing first, for its drilldown.
+
+    Narrowed through `_conviction_scope`, the same expression the listing row beside it was built from,
+    so this pane lists exactly the convictions that row counted. A reader's per-conviction clause
+    reaches both or neither: narrowing the row to one queue's 15 convictions while the pane went on
+    counting all 90 made the page contradict itself, and the pane is the only place a reader can check
+    the row's figures against the convictions behind them.
+
+    The clauses that describe the GROUP — an aggregate, or a set operator on the rule — are the HAVING
+    half and are not applied here. They chose which tests the listing holds; inside one of those tests
+    there is no group left for them to narrow.
+
+    `test_name` is bound, never spelled into the SQL. Capped at `limit`, with the total it was cut from,
+    so a test convicted on every later pull request that tripped it still hands back a bounded pane that
+    says what it left out. The order is fixed rather than a reader's, since there is one thing to read a
+    conviction list by — when it landed — and the build id behind it makes that order total.
+    """
+    where, _, parameters = _conviction_scope(since, until, verdicts, suite, builders, conditions)
+    parameters.update({'test_name': test_name, 'limit': limit})
+    source = f'''{CONVICTION_SOURCE}
+                WHERE {where} AND outcome.test_name = :test_name'''
+    # Counted without the row query's correlated subqueries, and through the same WHERE, so the two
+    # cannot disagree about the set this pane was taken from.
+    total = connection.execute(f'SELECT COUNT(*) {source}', parameters).fetchone()[0]
     listed = [
         Conviction(
             test_name=row['test_name'],
@@ -1034,31 +1295,23 @@ def convictions(connection: sqlite3.Connection, since: int, until: int, verdicts
             recent_checked_at=row['recent_checked_at'],
         )
         for row in connection.execute(
-            f'''SELECT outcome.*, verdict.rule, build.builder, build.builder_id,
-                       build.build_number, build.pr_id, build.suite, build.platform,
-                       build.style, build.flavor, build.sha AS tested_sha,
-                       (SELECT newer.sha FROM build_verdicts AS newer
-                         WHERE newer.pr_id = build.pr_id AND newer.sha IS NOT NULL
-                           AND outcome.landed_at IS NOT NULL AND newer.started_at <= outcome.landed_at
-                         ORDER BY newer.started_at DESC, newer.build_id DESC LIMIT 1) AS newest_sha,
-                       (SELECT COUNT(DISTINCT other.sha) FROM build_verdicts AS other
-                         WHERE other.pr_id = build.pr_id AND other.sha IS NOT NULL) AS heads,
-                       (SELECT COUNT(*) FROM build_verdicts AS other
-                         WHERE other.pr_id = build.pr_id) AS builds
+            f'''SELECT {CONVICTION_COLUMNS}
                 {source}
-                ORDER BY {filters.order_by(filters.ESCAPES, sort_keys)}
-                LIMIT :limit OFFSET :offset''',
+                ORDER BY outcome.landed_at DESC, outcome.build_id DESC
+                LIMIT :limit''',
             parameters,
         )
     ]
-    return ConvictionPage(convictions=listed, total=total, limit=size, offset=offset)
+    return TestConvictions(convictions=tuple(listed), total=total, limit=limit)
 
 
-# How many words a reason may be. A row in the merged escape bucket answers "why" in three count
+# How many words a reason may be. A conviction in the merged escape bucket answers "why" in three count
 # pairs — the baseline, the counts after the landing, and the counts main has run lately — and the
 # prose that used to say the same thing in English ran to 21 words a row and 4,359 down the column. A
 # category main answered nothing about has no pairs to print and an em dash alone does not say why, so
-# it gets a phrase instead, capped here so the column cannot grow back into prose.
+# it gets a phrase instead, capped here so the column cannot grow back into prose. Both live in the
+# drilldown now: a listing row is a test, and neither a pooled pair nor one conviction's phrase would
+# describe the group it stands for.
 REASON_WORDS = 6
 
 

@@ -63,13 +63,20 @@ TREE_DIVERGED = 'TREE_DIVERGED'
 
 ESCAPE_VERDICTS = (ESCAPED, FAILS_ON_MAIN, CONTAINED, NO_RUNS, NO_BASELINE, TREE_DIVERGED)
 
-# What `escapes.rate_increase_for_counts` and `escapes.damage_for_counts` are registered under on a
-# connection (`db.connect`), so a column can be ordered and narrowed by a figure the page derives on
-# read rather than by a second copy of the formula written in SQL. Named here for the same reason the
-# verdicts are: `filters` spells them into a column expression and `escapes` registers them, and
-# neither may import the other.
+# What `escapes.rate_increase_for_counts` is registered under on a connection (`db.connect`), so a
+# column can be ordered and narrowed by a figure the page derives on read rather than by a second copy
+# of the formula written in SQL. Named here for the same reason the verdicts are: `filters` spells it
+# into a column expression and `escapes` registers it, and neither may import the other.
 ESCAPE_INCREASE_FUNCTION = 'escape_rate_increase'
-ESCAPE_DAMAGE_FUNCTION = 'escape_damage'
+
+# The same, for the two sqlite AGGREGATES the grouped escapes listing needs: one test's row is many
+# convictions collapsed, and neither of these figures is a sum, a mean or a max of what the page
+# prints per conviction. `escape_current_damage` is the damage at the group's latest currency check,
+# and `escape_worst_build` names the conviction supplying the group's largest rate increase, which is
+# the one configuration a grouped row can honestly link a test timeline to.
+ESCAPE_CURRENT_DAMAGE_FUNCTION = 'escape_current_damage'
+ESCAPE_WORST_BUILD_FUNCTION = 'escape_worst_build'
+
 
 # Above this many author-visible failures the build is a crash storm, not a set of test results;
 # classifying it test-by-test would cost hundreds of lookups to describe a broken checkout.

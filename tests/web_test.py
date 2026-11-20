@@ -30,6 +30,27 @@ PAGE = 'page'
 
 
 class WebTest(fixtures.DatabaseTest):
+    def selected_category(self, page: str) -> str:
+        """The verdict the category strip shows as chosen, read off the chip that carries `chosen`.
+
+        The chip is the verdict's own `state` pill made clickable, so the class carries the name: the
+        `category-chip` part is what tells it from the pill the listing's head and the split lines wear,
+        and from the queue rail's own selected row.
+        """
+        found = re.search(r'<a class="state state-(\w+) category-chip chosen"', page)
+        self.assertIsNotNone(found, 'no category chip is chosen')
+        return found.group(1)
+
+    def category_tally(self, page: str, verdict: str) -> str:
+        """The count the category strip prints on one verdict's chip.
+
+        The chip holds its own tally, so a caller asserting a count never has to spell the strip's
+        markup and no test breaks when the strip is restyled.
+        """
+        found = re.search(rf'state-{verdict}[^>]*>{verdict}<span class="tally">(\d+)</span>', page)
+        self.assertIsNotNone(found, f'no category chip for {verdict}')
+        return found.group(1)
+
     def setUp(self) -> None:
         super().setUp()
         self.client = web_app.create_app(self.database_path).test_client()
@@ -1867,14 +1888,6 @@ class TestEscapes(WebTest):
                  int(time.time()), int(time.time()), recent_runs, recent_failed, recent_checked_at),
             )
 
-    def selected_category(self, page: str) -> str:
-        """The verdict the categories pane shows as chosen, read from the pill inside its entry. The
-        pill is what tells a category entry from the queue rail's, which is selected too."""
-        found = re.search(r'<a class="entry selected"[^>]*>\s*<span class="line">\s*'
-                          r'<span class="label"><span class="state state-(\w+)">', page)
-        self.assertIsNotNone(found, 'no category entry is selected')
-        return found.group(1)
-
     def test_a_window_with_nothing_decided_says_so_rather_than_reading_as_no_escapes(self) -> None:
         self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1, pr_title='One')
         page = self.page('/escapes')
@@ -1883,15 +1896,28 @@ class TestEscapes(WebTest):
 
     def test_an_escape_is_listed_with_the_runs_behind_it(self) -> None:
         """Three count pairs, not a sentence about them: the baseline, the counts after the landing,
-        and — where a currency check has run — the counts main has run lately."""
+        and — where a currency check has run — the counts main has run lately. They are in the opened
+        test's own convictions, because a listing row is a test and no pooling of the pairs behind it
+        would be a pair any run produced."""
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=72555,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
-        page = self.page('/escapes')
+        page = self.page('/escapes?test=fast/a.html')
         self.assertIn('fast/a.html', page)
         self.assertIn('<span class="evidence">0/4</span>', page)
         self.assertIn('<span class="evidence">3/3</span>', page)
         self.assertIn('pull/72555', page)
+
+    def test_a_listing_row_carries_no_count_pair_of_its_own(self) -> None:
+        """No aggregate of the three pairs is honest — a landed regression poisons every later
+        conviction's baseline, and the convictions of one test query overlapping windows on main — so
+        the row says how many convictions it stands for and the pairs stay one conviction at a time."""
+        build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=72555,
+                                    pr_title='One')
+        self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
+        page = self.page('/escapes')
+        self.assertNotIn('<span class="evidence">', page)
+        self.assertEqual(page.count('>history</a>'), 1)
 
     def test_the_two_computed_columns_show_a_header_and_a_value(self) -> None:
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=72555,
@@ -1902,9 +1928,10 @@ class TestEscapes(WebTest):
         self.assertIn('Rate increase', page)
         self.assertIn('Current damage', page)
         self.assertIn('-17.9%', page)
-        self.assertIn('1/8', page)
         self.assertIn('7.5%', page)
-        self.assertIn('3/40', page)
+        opened = self.page('/escapes?test=fast/a.html')
+        self.assertIn('1/8', opened)
+        self.assertIn('3/40', opened)
 
     def test_the_computed_columns_round_to_one_decimal_place(self) -> None:
         """`percent` itself prints every significant digit sqlite's float division carries, which
@@ -1931,16 +1958,19 @@ class TestEscapes(WebTest):
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=72555,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
-        self.assertIn(formatting.moment(fixtures.DEFAULT_BUILD_TIME), self.page('/escapes'))
+        page = self.page('/escapes')
+        self.assertIn(f'<span title="{formatting.clock(fixtures.DEFAULT_BUILD_TIME)}">'
+                      f'{formatting.day(fixtures.DEFAULT_BUILD_TIME)}</span>', page)
+        self.assertNotIn(formatting.moment(fixtures.DEFAULT_BUILD_TIME), page)
 
     def test_an_escape_with_no_stored_landing_time_says_so_rather_than_printing_a_date(self) -> None:
         """The backfill leaves a row whose landing the database no longer holds at null. The counts
         either side of that landing are still the evidence, so the row is listed and the time it
-        cannot name is named as unknown."""
+        cannot name is named as unknown — in the row and again on the conviction inside it."""
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=72555,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED, landed_at=None)
-        page = self.page('/escapes')
+        page = self.page('/escapes?test=fast/a.html')
         self.assertIn('Landing time unknown', page)
         self.assertIn('fast/a.html', page)
         self.assertIn('<span class="evidence">3/3</span>', page)
@@ -1959,7 +1989,7 @@ class TestEscapes(WebTest):
         self._stored_escape(third, 'fast/c.html', escapes.NO_RUNS, failed_after=0, runs_after=0)
         page = self.page('/escapes')
         self.assertIn('<span class="value">50%</span>', page)
-        self.assertIn('1 of 2 convictions main answered', page)
+        self.assertIn('of 2 convictions main answered', page)
 
     def test_serving_the_page_never_reaches_results_webkit_org(self) -> None:
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
@@ -1980,14 +2010,15 @@ class TestEscapes(WebTest):
         self.assertIn('No conviction in this window escaped', page)
 
     def test_a_verdict_drilled_into_lists_its_convictions_and_why(self) -> None:
-        """A category main answered nothing about prints an em dash in both numeric cells, so its rows
-        keep a reason — a phrase, capped at `escapes.REASON_WORDS` words, not the paragraph that used
-        to stand here."""
+        """A category main answered nothing about prints an em dash in both numeric cells, so its
+        convictions keep a reason — a phrase, capped at `escapes.REASON_WORDS` words, not the paragraph
+        that used to stand here. It is on the conviction rather than on the test's row: a phrase about
+        one conviction would not describe the group, and the group has no runs to count."""
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=72555,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.CONTAINED, failed_after=0,
                             runs_after=5)
-        page = self.page(f'/escapes?verdict={escapes.CONTAINED}')
+        page = self.page(f'/escapes?verdict={escapes.CONTAINED}&test=fast/a.html')
         self.assertIn('Never failed it in 5 runs', page)
         self.assertIn('pull/72555', page)
 
@@ -2007,7 +2038,7 @@ class TestEscapes(WebTest):
         self._stored_escape(build_id, 'fast/a.html', escapes.CONTAINED, failed_after=0)
         page = self.page(f'/escapes?verdict={escapes.CONTAINED}')
         self.assertRegex(page, rf'class="badge active" href="[^"]*verdict={escapes.CONTAINED}')
-        self.assertRegex(page, rf'class="entry[^"]*"[^>]*href="[^"]*verdict={escapes.CONTAINED}')
+        self.assertRegex(page, rf'class="state [^"]*category-chip[^"]*"[^>]*href="[^"]*verdict={escapes.CONTAINED}')
 
     def test_the_page_shows_the_escapes_it_exists_for_when_nothing_is_chosen(self) -> None:
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
@@ -2044,29 +2075,24 @@ class TestEscapes(WebTest):
         page = self.page('/escapes')
         for verdict in escapes.CATEGORIES:
             expected = 1 if verdict == escapes.CONTAINED else 0
-            self.assertRegex(page, rf'state-{verdict}">{verdict}</span></span>\s*'
-                                   rf'<span class="tally">{expected}</span>')
+            self.assertEqual(self.category_tally(page, verdict), str(expected))
             self.assertIn(f'verdict={verdict}', page)
         self.assertNotIn(f'state-{escapes.FAILS_ON_MAIN}">{escapes.FAILS_ON_MAIN}</span>', page)
 
-    def test_a_category_previews_its_meaning_and_the_chosen_one_reads_it_out(self) -> None:
-        """Six descriptions under six pills made the pane taller than the escapes beside it, so an
-        unselected category previews its meaning on hover and the selected one says it in the detail
-        pane, where there is room for a line of prose."""
+    def test_a_category_says_its_meaning_only_on_its_chip(self) -> None:
+        """The chip's tooltip already carries the description, and a paragraph repeating it above the
+        table cost two lines of every listing."""
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.CONTAINED, failed_after=0)
         page = self.page(f'/escapes?verdict={escapes.CONTAINED}')
         meaning = escapes.VERDICT_DESCRIPTIONS[escapes.CONTAINED]
         self.assertIn(f'title="{meaning}"', page)
-        self.assertIn(f'<p class="meaning text tiny">{meaning}</p>', page)
+        self.assertNotIn('class="meaning', page)
 
-    def test_the_meaning_gives_way_to_the_placeholder_when_there_is_nothing_to_list(self) -> None:
-        """Two paragraphs saying overlapping things read as a pane arguing with itself, and the
-        placeholder is the one that explains an empty pane."""
+    def test_an_empty_category_explains_itself_with_the_placeholder(self) -> None:
         page = self.page('/escapes')
         self.assertIn('No conviction in this window escaped', page)
-        self.assertNotIn('<p class="meaning text tiny">', page)
 
     def test_the_categories_pane_tallies_the_convictions_it_divides_up(self) -> None:
         first = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
@@ -2119,9 +2145,9 @@ class TestEscapes(WebTest):
         self._stored_escape(third, 'fast/c.html', escapes.CONTAINED, failed_after=0)
         page = self.page('/escapes')
         self.assertIn('Strong escapes', page)
-        self.assertIn('1 of 3 convictions main answered', page)
-        self.assertRegex(page, rf'state-{escapes.ESCAPED}">{escapes.ESCAPED}</span>'
-                               r'</span>\s*<span class="tally">2</span>')
+        self.assertIn('of 3 convictions main answered', page)
+        self.assertNotIn('1 of 3 convictions', page)
+        self.assertEqual(self.category_tally(page, escapes.ESCAPED), '2')
 
     def test_a_low_rate_escape_is_no_category_of_its_own(self) -> None:
         """One bucket, split under itself: a sibling category would let a reader add the two and
@@ -2131,8 +2157,7 @@ class TestEscapes(WebTest):
         self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED, failed_after=1,
                             runs_after=96)
         page = self.page('/escapes')
-        self.assertRegex(page, rf'state-{escapes.ESCAPED}">{escapes.ESCAPED}</span>'
-                               r'</span>\s*<span class="tally">1</span>')
+        self.assertEqual(self.category_tally(page, escapes.ESCAPED), '1')
         self.assertNotIn('ESCAPED_RARELY', page)
 
     def test_the_placeholder_does_not_claim_nothing_escaped_on_few_failures(self) -> None:
@@ -2216,13 +2241,12 @@ class TestEscapes(WebTest):
         counts = self.currency_counts(page)
         self.assertEqual(counts, {'still failing it': 1, 'has stopped failing it': 1,
                                   'has not run it lately': 1, 'not checked yet': 1})
-        self.assertRegex(page, rf'state-{escapes.ESCAPED}">{escapes.ESCAPED}</span></span>\s*'
-                               r'<span class="tally">4</span>')
+        self.assertEqual(self.category_tally(page, escapes.ESCAPED), '4')
         self.assertEqual(sum(counts.values()), 4)
 
     def test_a_listed_escape_says_what_main_is_doing_with_it_now_in_the_damage_cell(self) -> None:
-        """The Current damage cell is where this is now said, in the recent pair: failures over runs
-        for a test main is still failing, and zero over runs for one it has stopped failing. The prose
+        """The Current damage cell is where this is now said: as a rate on the test's row, at the
+        latest check that row holds, and as the recent pair on each conviction inside it. The prose
         that said the same thing in English repeated both figures in the same row."""
         still = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                  pr_title='One')
@@ -2234,10 +2258,12 @@ class TestEscapes(WebTest):
         self._stored_escape(recovered, 'fast/b.html', escapes.ESCAPED, recent_runs=44,
                             recent_failed=0, recent_checked_at=now)
         page = self.page('/escapes')
-        self.assertIn('77.5%<span class="evidence">31/40</span>', page)
-        self.assertIn('0%<span class="evidence">0/44</span>', page)
+        self.assertIn('77.5%', page)
+        self.assertIn('0%', page)
         self.assertNotIn('Main is still failing it', page)
         self.assertNotIn('Main has stopped failing it', page)
+        opened = self.page('/escapes?test=fast/a.html')
+        self.assertIn('77.5%<span class="evidence">31/40</span>', opened)
 
     def test_a_listed_escape_main_has_not_run_lately_shows_no_damage_and_is_counted_as_such(self) \
             -> None:
@@ -2255,12 +2281,12 @@ class TestEscapes(WebTest):
         self.assertIn('Blank is no answer, not zero', page)
 
     def test_an_unchecked_escape_claims_nothing_about_the_last_week(self) -> None:
-        """Nothing has asked main about it, so the damage cell is blank and the row still carries the
-        two count pairs the verdict was decided on."""
+        """Nothing has asked main about it, so the damage cell is blank and the conviction inside the
+        row still carries the two count pairs the verdict was decided on."""
         build_id = self.store_build(1, flaky={'fast/a.html': config.CLEAN_TREE}, pr_id=1,
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.ESCAPED)
-        page = self.page('/escapes')
+        page = self.page('/escapes?test=fast/a.html')
         self.assertIn('<span class="evidence">0/4</span>', page)
         self.assertIn('<span class="evidence">3/3</span>', page)
         self.assertIn(formatting.MISSING, page)
@@ -2280,7 +2306,7 @@ class TestEscapes(WebTest):
                                     pr_title='One')
         self._stored_escape(build_id, 'fast/a.html', escapes.FAILS_ON_MAIN, failed_after=7,
                             runs_after=58)
-        page = self.page(f'/escapes?verdict={escapes.FAILS_ON_MAIN}')
+        page = self.page(f'/escapes?verdict={escapes.FAILS_ON_MAIN}&test=fast/a.html')
         self.assertIn('<span class="evidence">0/4</span>', page)
         self.assertIn('<span class="evidence">7/58</span>', page)
         self.assertNotIn('before it.', page)
@@ -2394,30 +2420,62 @@ class EscapeRows(WebTest):
         return build_id
 
     def rows_rendered(self, page: str) -> int:
-        """How many convictions the table listed, counted by the one link every row carries."""
+        """How many TESTS the listing rendered, counted by the drilldown link every parent row's test
+        name carries. Not by `history`: the open drilldown's head carries one of those too."""
+        return page.count('#test-detail">')
+
+    def convictions_rendered(self, page: str) -> int:
+        """How many convictions the open drilldown listed, counted by the link each one carries."""
         return page.count('>Build</a>')
-
-
-class TestEscapesOrder(EscapeRows):
-    """The escapes listing's order, which is a URL rather than a click handler: the page must be
-    answerable by a plain GET with the script disabled, and survive a hand-edited argument."""
-
-    SORTED_HEADER = re.compile(r'<th class="[^"]*\bsorted\b[^"]*"><a[^>]*>([^<]+)')
-    INCREASE_CELL = re.compile(r'>(-?[\d.]+)%<span class="evidence">')
 
     def _three_escapes(self) -> None:
         self._escape(1, 'fast/thin.html', runs_after=100, failed_after=1)
         self._escape(2, 'fast/hard.html', runs_after=10, failed_after=10)
         self._escape(3, 'fast/half.html', runs_after=10, failed_after=5)
 
+    def row_link(self, page: str) -> str:
+        """The first listing row's own link, which is the one that opens that test's convictions."""
+        found = re.search(r'<td role="rowheader">\s*<a href="([^"]*)"', page)
+        self.assertIsNotNone(found, 'no listing row rendered')
+        return found.group(1).replace('&amp;', '&')
+
+    def listing_rows(self, page: str) -> list:
+        """Each listing row's cells, in order.
+
+        Read out of the listing table's own `<tbody>` rather than by the `class` a row carries: only the
+        row whose convictions are open beside the table has one.
+        """
+        table = page.split('<table class="table full-width convictions">')[1]
+        body = table.split('<tbody>')[1].split('</tbody>')[0]
+        return [re.findall(r'<td[^>]*>(.*?)</td>', row, re.S)
+                for row in re.findall(r'<tr[^>]*>(.*?)</tr>', body, re.S)]
+
+
+class TestEscapesOrder(EscapeRows):
+    """The escapes listing's order, which is a URL rather than a click handler: the page must be
+    answerable by a plain GET with the script disabled, and survive a hand-edited argument."""
+
+    SORTED_HEADER = re.compile(r'<th class="[^"]*\bsorted\b[^"]*"[^>]*><a[^>]*>([^<]+)')
+    # Where the rate increase sits in a listing row, counted from the left: Test, Rule, Count, Landed,
+    # Rate increase, Current damage. Read by position because the two figure columns carry the same
+    # classes, and the figure is alone in the cell now — the after pair that used to sit under it is in
+    # the drilldown. One lower than it was: `Queues` is gone, since 135 of 157 tests were convicted on a
+    # single queue and the drilldown beside the row names each queue anyway.
+    INCREASE_COLUMN = 4
+
     def _increases(self, page: str) -> list:
-        return [float(figure) for figure in self.INCREASE_CELL.findall(page)]
+        figures = []
+        for cells in self.listing_rows(page):
+            found = re.search(r'(-?[\d.]+)%', cells[self.INCREASE_COLUMN])
+            if found:
+                figures.append(float(found.group(1)))
+        return figures
 
     def _order(self, page: str, *names: str) -> list:
         return [page.index(name) for name in names]
 
     def _heading_link(self, page: str, key: str) -> str:
-        found = re.search(rf'<th class="sortable[^"]*"><a href="([^"]*{re.escape(ESCAPE_SORT)}='
+        found = re.search(rf'<th class="sortable[^"]*"[^>]*><a href="([^"]*{re.escape(ESCAPE_SORT)}='
                           rf'{re.escape(key)}:[^"]*)"', page)
         self.assertIsNotNone(found, f'no heading offered to sort by {key}')
         return found.group(1).replace('&amp;', '&')
@@ -2437,18 +2495,17 @@ class TestEscapesOrder(EscapeRows):
 
     def test_no_sentence_names_the_order_because_the_page_already_shows_it(self) -> None:
         """The order is on the page twice without a paragraph: the sorted column carries an arrow, and
-        the sort control holds the column and direction it was set to — including for the two
-        after-the-landing counts, which have no column of their own to mark."""
+        the sort control holds the column and direction it was set to."""
         self._three_escapes()
         for url in ('/escapes', f'/escapes?{ESCAPE_SORT}=test:asc',
-                    f'/escapes?{ESCAPE_SORT}=runs_after:desc',
+                    f'/escapes?{ESCAPE_SORT}=convictions:desc',
                     f'/escapes?{ESCAPE_FILTER}=test:has:fast'):
             self.assertNotIn('Ordered by', self.page(url), f'{url} still names its order in prose')
         self.assertRegex(self.page('/escapes'),
-                         r'<th class="sortable numeric sorted">.*?Rate increase'
-                         r'<span class="arrow">▾</span>')
-        counted = self.page(f'/escapes?{ESCAPE_SORT}=runs_after:desc')
-        self.assertIn('<option value="runs_after" selected>Runs after landing</option>', counted)
+                         r'<th class="sortable numeric sorted"[^>]*aria-sort="descending"[^>]*>'
+                         r'.*?Rate increase</a><span class="arrow" aria-hidden="true">▾</span>')
+        counted = self.page(f'/escapes?{ESCAPE_SORT}=convictions:desc')
+        self.assertIn('<option value="convictions" selected>Convictions</option>', counted)
         self.assertIn('<option value="desc" selected>Descending</option>', counted)
 
     def test_a_sort_argument_reorders_the_listed_convictions(self) -> None:
@@ -2524,14 +2581,15 @@ class TestEscapesOrder(EscapeRows):
 
     def test_the_links_cell_puts_the_pull_request_above_the_build(self) -> None:
         """A reader scanning this column is going to the change, not to the build that convicted it.
-        All three leave this host, so all three carry target and rel; the page-wide check below
-        asserts that invariant, and this one asserts the order it is in."""
+        It is in the opened test's convictions, since a link to one build cannot stand for a row that
+        collapses several. All three leave this host, so all three carry target and rel; the page-wide
+        check below asserts that invariant, and this one asserts the order it is in."""
         self._three_escapes()
-        page = self.page('/escapes')
+        page = self.page('/escapes?test=fast/hard.html')
         cell = re.search(r'<td class="text tiny links">(.*?)</td>', page, re.S)
         self.assertIsNotNone(cell)
         labels = re.findall(r'<a [^>]*>([^<]+)</a>', cell.group(1))
-        self.assertEqual(labels, ['PR', 'Build', 'History'])
+        self.assertEqual(labels, ['PR', 'Build'])
         for anchor in re.findall(r'<a [^>]*>', cell.group(1)):
             self.assertIn('target="_blank"', anchor)
             self.assertIn('rel="noopener"', anchor)
@@ -2551,19 +2609,20 @@ class TestEscapesOrder(EscapeRows):
                 (build_id, 'fast/nopr.html', escapes.ESCAPED, 4, 0, 8, 2,
                  fixtures.DEFAULT_BUILD_TIME, int(time.time()), int(time.time())),
             )
-        row = re.search(r'<tr>(?:(?!</tr>).)*fast/nopr\.html.*?</tr>', self.page('/escapes'), re.S)
-        self.assertIsNotNone(row, 'the pull-request-less conviction did not render')
-        cell = re.search(r'<td class="text tiny links">(.*?)</td>', row.group(0), re.S)
+        drilldown = re.search(r'<table class="table full-width escape-convictions".*?</table>',
+                              self.page('/escapes?test=fast/nopr.html'), re.S)
+        self.assertIsNotNone(drilldown, 'the pull-request-less conviction did not render')
+        cell = re.search(r'<td class="text tiny links">(.*?)</td>', drilldown.group(0), re.S)
         self.assertIsNotNone(cell)
-        self.assertEqual(re.findall(r'<a [^>]*>([^<]+)</a>', cell.group(1)), ['Build', 'History'])
+        self.assertEqual(re.findall(r'<a [^>]*>([^<]+)</a>', cell.group(1)), ['Build'])
         self.assertNotIn('>PR</a>', cell.group(1))
         self.assertNotRegex(cell.group(1), r'<a [^>]*>\s*</a>')
 
     def test_no_internal_control_opens_a_new_tab(self) -> None:
         """Commit e7e1a8e made the outbound links open in a new tab and left in-place navigation
-        alone; the filter, sort and page controls added here are in-place navigation."""
+        alone; the filter, sort, page and drilldown controls added here are in-place navigation."""
         self._three_escapes()
-        page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:fast')
+        page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:fast&test=fast/hard.html')
         anchors = re.findall(r'<a[^>]*>', page)
         internal = [anchor for anchor in anchors if 'href="/' in anchor]
         self.assertTrue(internal)
@@ -2571,7 +2630,7 @@ class TestEscapesOrder(EscapeRows):
             self.assertNotIn('target="_blank"', anchor)
         for outbound in ('results.webkit.org', 'github.com'):
             self.assertRegex(page, rf'<a href="[^"]*{re.escape(outbound)}[^"]*" target="_blank" '
-                                   r'rel="noopener">')
+                                   r'rel="noopener"[^>]*>')
 
     def test_the_filter_surface_is_a_details_holding_a_plain_get_form(self) -> None:
         """No script makes this work: a details element, a GET form, and submit buttons the server
@@ -2647,11 +2706,11 @@ class TestEscapesFilters(EscapeRows):
         self.assertNotIn('No conviction in this window escaped', page)
 
     def test_a_clause_this_page_cannot_read_is_ignored_and_named_rather_than_refused(self) -> None:
-        response = self.client.get(f'/escapes?{ESCAPE_FILTER}=convictions:gt:2'
+        response = self.client.get(f'/escapes?{ESCAPE_FILTER}=last_seen:gt:2'
                                    f'&{ESCAPE_FILTER}=test:has:webgl')
         self.assertEqual(response.status_code, 200)
         page = response.get_data(as_text=True)
-        self.assertIn('Ignored 1 filter this page cannot read: convictions:gt:2', page)
+        self.assertIn('Ignored 1 filter this page cannot read: last_seen:gt:2', page)
         self.assertIn('Everything below is filtered by the rest.', page)
         self.assertIn('fast/webgl/a.html', page)
         self.assertNotIn('fast/forms/b.html', page)
@@ -2693,8 +2752,8 @@ class TestEscapesPaging(EscapeRows):
     def _paged(self, limit: int) -> mock._patch:
         """Shrinks the page size for one request, so a paging test needs five rows and not four
         hundred."""
-        return mock.patch('ews_dashboard.web.app.escapes.convictions',
-                          functools.partial(escapes.convictions, limit=limit))
+        return mock.patch('ews_dashboard.web.app.escapes.answered_tests',
+                          functools.partial(escapes.answered_tests, limit=limit))
 
     def test_the_page_size_bounds_the_rows_rendered(self) -> None:
         self._convict_many(5)
@@ -2768,6 +2827,138 @@ class TestEscapesPaging(EscapeRows):
         self.assertIn('all 1 shown', page)
         self.assertNotIn('Page 1 of', page)
 
+    def test_opening_a_row_keeps_the_page_that_row_is_on(self) -> None:
+        """A row link that dropped the page took the reader to page 1, where the row they opened is
+        not — the one argument this page's link policy drops on purpose and this link needs back."""
+        self._convict_many(5)
+        with self._paged(2):
+            page = self.page(f'/escapes?{PAGE}=2')
+            self.assertIn('Page 2 of 3', page)
+            link = self.row_link(page)
+            self.assertIn(f'{PAGE}=2', link)
+            closing = re.search(r'<a class="badge" href="([^"]*)">close</a>',
+                                self.page(f'/escapes?{PAGE}=2&test=fast/f3.html'))
+        self.assertIsNotNone(closing)
+        self.assertIn(f'{PAGE}=2', closing.group(1))
+
+
+class TestEscapesRowLinks(EscapeRows):
+    """What the link on a row carries, which is this page's own stated policy and not every argument
+    the request happened to arrive with."""
+
+    def test_a_row_link_carries_neither_a_pending_chip_nor_a_clause_the_page_rejected(self) -> None:
+        """Built from the raw arguments, `?add_filter=1` rode into the drilldown link and re-added a
+        blank chip on arrival, and a clause the page had already refused to read rode in beside it."""
+        self._three_escapes()
+        link = self.row_link(self.page(f'/escapes?{ESCAPE_FILTER}=test:has:fast'
+                                       f'&{ESCAPE_FILTER}=bogus&add_filter=1'))
+        self.assertIn(f'{ESCAPE_FILTER}=test:has:fast', link)
+        self.assertNotIn('add_filter', link)
+        self.assertNotIn('bogus', link)
+
+    def test_the_close_link_carries_the_same_policy(self) -> None:
+        self._three_escapes()
+        found = re.search(r'<a class="badge" href="([^"]*)">close</a>',
+                          self.page(f'/escapes?test=fast/hard.html&{ESCAPE_FILTER}=bogus'
+                                    '&add_filter=1'))
+        self.assertIsNotNone(found)
+        link = found.group(1).replace('&amp;', '&')
+        self.assertNotIn('add_filter', link)
+        self.assertNotIn('bogus', link)
+        self.assertNotIn('test=', link)
+
+    def test_a_row_link_lands_the_reader_on_the_pane_it_opens(self) -> None:
+        """With no fragment the browser restarted at the document top, 142 tab stops above the pane the
+        press had just opened. The sort headings and the pager already carry one."""
+        self._three_escapes()
+        self.assertTrue(self.row_link(self.page('/escapes')).endswith('#test-detail'))
+
+
+class TestEscapesAccessibleNames(EscapeRows):
+    """What a reader who cannot see the table is told: which row a figure belongs to, which way a
+    column is sorted, which test an opened pane holds, and where 104 identically named links go."""
+
+    def _opened(self) -> str:
+        self._three_escapes()
+        return self.page('/escapes?test=fast/hard.html')
+
+    def test_every_header_cell_says_what_it_heads(self) -> None:
+        """13 column headers carried no `scope`, so nothing said which cells each one governs. 10 of
+        them now: the listing lost `Queues`, and a drilldown on one queue whose damage nobody checked
+        omits `Queue` and `Current damage`."""
+        page = self._opened()
+        headers = re.findall(r'<th(?:\s[^>]*)?>', page)
+        self.assertEqual(len(headers), 10)
+        for header in headers:
+            self.assertIn('scope="col"', header, header)
+        self.assertEqual(page.count('role="rowheader"'), self.rows_rendered(page)
+                         + self.convictions_rendered(page))
+
+    def test_a_row_is_headed_by_the_test_it_stands_for(self) -> None:
+        """`role="rowheader"` and not `th scope="row"`, which `.table th` would uppercase, paint faint
+        and refuse to wrap: measured, that grew the listing from 1,150px to 1,298px and shouted every
+        test path. The role is what the native element maps to, so a reader hears the same thing."""
+        page = self._opened()
+        self.assertRegex(page, r'<td role="rowheader">\s*<a[^>]*>fast/<wbr>hard\.<wbr>html</a>')
+        self.assertRegex(page, r'<td class="when text tiny" role="rowheader"><span title="[^"]*">2026-02-02')
+
+    def test_the_column_a_table_is_ordered_by_states_its_direction(self) -> None:
+        self._three_escapes()
+        ascending = self.page(f'/escapes?{ESCAPE_SORT}=test:asc')
+        self.assertRegex(ascending, r'<th class="sortable sorted" scope="col" aria-sort="ascending"')
+        descending = self.page(f'/escapes?{ESCAPE_SORT}=test:desc')
+        self.assertRegex(descending, r'<th class="sortable sorted" scope="col" aria-sort="descending"')
+        self.assertIn('aria-sort="none"', descending)
+
+    def test_the_sort_arrow_is_decorative_and_outside_the_control_it_marks(self) -> None:
+        """Inside the link the control's accessible name read `Rate increase▾`, which names nothing."""
+        page = self._opened()
+        self.assertIn('<span class="arrow" aria-hidden="true">', page)
+        self.assertNotRegex(page, r'<a[^>]*>[^<]*<span class="arrow"')
+
+    def test_the_opened_pane_and_its_table_name_the_test_they_hold(self) -> None:
+        page = self._opened()
+        self.assertIn('<span class="name" id="test-detail-name">', page)
+        self.assertRegex(page, r'<div class="pane escape-detail" id="test-detail" role="region" '
+                               r'aria-labelledby="test-detail-name">')
+        self.assertRegex(page, r'<table class="table full-width escape-convictions" '
+                               r'aria-labelledby="test-detail-name">')
+
+    def test_both_tables_scroll_from_the_keyboard_and_say_what_they_hold(self) -> None:
+        """A scroll container with no `tabindex` cannot be reached without a pointer, and with no name
+        a reader entering it is not told which table they are in."""
+        page = self._opened()
+        wrappers = re.findall(r'<div class="table-scroll"[^>]*>', page)
+        self.assertEqual(len(wrappers), 2)
+        for wrapper in wrappers:
+            self.assertIn('tabindex="0"', wrapper)
+            self.assertIn('role="region"', wrapper)
+            self.assertRegex(wrapper, r'aria-labelledby="(convictions|test-detail)-name"')
+
+    def test_each_link_of_a_conviction_says_where_it_goes(self) -> None:
+        """68 links named `history`, 18 named `PR` and 18 named `Build` read as one list of identical
+        names; each names the thing it goes to instead."""
+        page = self._opened()
+        for pattern in (r'aria-label="Results history for fast/hard\.html"',
+                        r'aria-label="Pull request \d+"',
+                        rf'aria-label="Build \d+ on {re.escape(fixtures.LAYOUT_BUILDER)}"'):
+            self.assertRegex(page, pattern)
+
+    def test_the_open_row_and_the_open_category_are_marked_as_current(self) -> None:
+        """Both signalled by a tint alone, which is no signal at all to a reader who cannot see it."""
+        page = self._opened()
+        self.assertIn('<tr class="selected" aria-current="true">', page)
+        self.assertIn('category-chip chosen" aria-current="true"', page)
+
+    def test_a_pending_chip_leaves_the_surface_it_was_added_to_open(self) -> None:
+        """`+ filter` answered with the disclosure closed and the row it had just added inside it, so
+        the press read as having done nothing. The glyph's count stays the committed clauses."""
+        self._three_escapes()
+        for pressed in ('add_filter=1', 'add_sort=1'):
+            page = self.page(f'/escapes?{pressed}')
+            self.assertIn('<details class="table-filter" open>', page, pressed)
+            self.assertIn('aria-label="Filter and sort">⇅</summary>', page, pressed)
+
 
 class TestEscapesClauseRemoval(EscapeRows):
     """The escapes listing's own deletes, which have two arguments to answer for that `/tests` does
@@ -2788,7 +2979,7 @@ class TestEscapesClauseRemoval(EscapeRows):
 
     def test_removing_the_middle_of_three_filters_leaves_the_others_in_order(self) -> None:
         page = self.page(f'/escapes?{ESCAPE_FILTER}=test:has:fast'
-                         f'&{ESCAPE_FILTER}=runs_after:ge:1'
+                         f'&{ESCAPE_FILTER}=convictions:ge:1'
                          f'&{ESCAPE_FILTER}=test:nohas:forms')
         arguments = parse_qs(urlsplit(self.removal_link(page, 'Remove filter 2')).query)
         self.assertEqual(arguments[ESCAPE_FILTER], ['test:has:fast', 'test:nohas:forms'])
@@ -2828,7 +3019,7 @@ class TestEscapesClauseRemoval(EscapeRows):
                             ('/escapes?add_filter=1', 1),
                             (f'/escapes?{ESCAPE_FILTER}=test:has:fast&add_filter=1', 2),
                             (f'/escapes?{ESCAPE_FILTER}=test:has:fast'
-                             f'&{ESCAPE_FILTER}=runs_after:ge:1'
+                             f'&{ESCAPE_FILTER}=convictions:ge:1'
                              f'&{ESCAPE_FILTER}=test:nohas:forms', 3)):
             page = self.page(query)
             controls = (page.count('<a class="chip-remove"')
@@ -2841,7 +3032,7 @@ class TestEscapesClauseRemoval(EscapeRows):
             f'&{filters.filter_chip_argument(filters.ESCAPES, 0, "column")}=test'
             f'&{filters.filter_chip_argument(filters.ESCAPES, 0, "op")}=has'
             f'&{filters.filter_chip_argument(filters.ESCAPES, 0, "value")}=fast'
-            f'&{filters.filter_chip_argument(filters.ESCAPES, 1, "column")}=runs_after'
+            f'&{filters.filter_chip_argument(filters.ESCAPES, 1, "column")}=convictions'
             f'&{filters.filter_chip_argument(filters.ESCAPES, 1, "op")}=ge'
             f'&{filters.filter_chip_argument(filters.ESCAPES, 1, "value")}=99'
             f'&remove_filter=1')
@@ -2850,7 +3041,7 @@ class TestEscapesClauseRemoval(EscapeRows):
         self.assertEqual(arguments[ESCAPE_FILTER], ['test:has:fast'])
         self.assertEqual(arguments['verdict'], [escapes.ESCAPED])
         # Two of the three fixtures are `fast/...`, so the kept clause lists both; the dropped
-        # pending clause would have demanded 99 runs after the landing and matched neither.
+        # pending clause would have demanded 99 convictions of one test and matched neither.
         self.assertEqual(self.rows_rendered(self.page(response.headers['Location'])), 2)
 
 
@@ -3075,6 +3266,17 @@ class TestFormatting(WebTest):
     def test_a_missing_clock_is_empty_rather_than_a_second_sentinel(self) -> None:
         self.assertEqual(formatting.clock(None), '')
 
+    def test_a_test_path_breaks_only_at_its_joints_and_stays_escaped(self) -> None:
+        self.assertEqual(str(formatting.path_breaks('css/all-prop<b>.html')),
+                         'css/<wbr>all-<wbr>prop&lt;b&gt;.<wbr>html')
+        self.assertEqual(str(formatting.path_breaks('TestWebKitAPI.WritingTools')),
+                         'Test<wbr>Web<wbr>Kit<wbr>API.<wbr>Writing<wbr>Tools')
+
+    def test_a_queue_label_drops_the_suffix_every_queue_shares(self) -> None:
+        self.assertEqual(formatting.queue_label('macOS-Tahoe-Debug-WK2-Tests-EWS'), 'macOS-Tahoe-Debug-WK2')
+        self.assertEqual(formatting.queue_label('macOS-Tahoe-Debug-API-Tests-EWS'), 'macOS-Tahoe-Debug-API')
+        self.assertEqual(formatting.queue_label('API-Tests-GTK-EWS'), 'API-Tests-GTK')
+
 
 class TestEscapesMergedBucket(EscapeRows):
     """The escapes page with ESCAPED and FAILS_ON_MAIN shown as one bucket.
@@ -3084,12 +3286,11 @@ class TestEscapesMergedBucket(EscapeRows):
     reachable on its own.
     """
 
-    # Anchored on the pane entry's own `<span class="line">`, which a split line does not have: a split
-    # line is `class="line text tiny"`. Both now wear a `state` pill, so an unanchored pattern reads
-    # STRONG as the ESCAPED category and UNPROVEN as a category that does not exist.
-    CATEGORY_TALLY = re.compile(r'<span class="line">\s*<span class="label">'
-                                r'<span class="state state-(\w+)">\w+</span></span>\s*'
-                                r'<span class="tally">(\d+)</span>')
+    # Anchored on `category-chip`, which only a chip in the strip carries: the split lines wear a
+    # `state` pill too, so an unanchored pattern reads STRONG as the ESCAPED category and UNPROVEN as a
+    # category that does not exist.
+    CATEGORY_TALLY = re.compile(r'<a class="state state-(\w+) category-chip[^"]*"[^>]*>'
+                                r'\w+<span class="tally">(\d+)</span>')
     SPLIT_LINE = re.compile(r'<span class="label">([^<]+)</span><span class="tally">(\d+)</span>')
 
     def categories(self, page: str) -> dict:
@@ -3123,22 +3324,30 @@ class TestEscapesMergedBucket(EscapeRows):
                      verdict=escapes.CONTAINED)
         page = self.page('/escapes')
         self.assertIn('<span class="value">75%</span>', page)
-        self.assertIn('3 of 4 convictions main answered, on 2 distinct tests', page)
+        self.assertIn('of 4 convictions main answered', page)
+        self.assertRegex(page, r'<span class="value">2</span><span class="text tiny label">Tests with a strong escape')
+        self.assertNotIn('3 of 4 convictions', page)
+        self.assertRegex(page, r'STRONG</span></span><span class="tally">3</span>')
 
     def test_the_listing_shows_both_halves_under_the_one_category(self) -> None:
+        """Two rows for three convictions, since the already-failing test is convicted twice, and its
+        row says so rather than repeating the test path down the page."""
         self._both_halves()
         page = self.page('/escapes')
-        self.assertEqual(self.rows_rendered(page), 3)
+        self.assertEqual(self.rows_rendered(page), 2)
         self.assertIn('fast/clean.html', page)
         self.assertIn('fast/poisoned.html', page)
+        self.assertEqual(self.convictions_rendered(self.page('/escapes?test=fast/poisoned.html')), 2)
 
-    def test_the_pane_says_how_many_distinct_tests_the_convictions_name(self) -> None:
-        """Three convictions on two tests: printing only the convictions invites reading them as
-        three separate regressions, which is what the old FAILS_ON_MAIN population made easy."""
+    def test_the_distinct_test_count_is_printed_once_and_by_the_listing(self) -> None:
+        """Three convictions on two tests: printing only the convictions invites reading them as three
+        separate regressions. The listing's own tally is that count and already carries the paging
+        phrasing, so the split beside it printed the same figure a second time from a second query."""
         self._both_halves()
         page = self.page('/escapes')
         self.assertEqual(self.categories(page)[escapes.ESCAPED], 3)
-        self.assertEqual(self.split_lines(page)['distinct tests'], 2)
+        self.assertIn('all 2 shown', page)
+        self.assertNotIn('distinct tests', self.split_lines(page))
 
     def test_the_pane_splits_the_bucket_by_what_the_baseline_said(self) -> None:
         self._both_halves()
@@ -3170,30 +3379,33 @@ class TestEscapesMergedBucket(EscapeRows):
         the bucket it asked for is gone."""
         self._both_halves()
         page = self.page(f'/escapes?verdict={escapes.FAILS_ON_MAIN}')
-        selected = re.search(r'<a class="entry selected"[^>]*>\s*<span class="line">\s*'
-                             r'<span class="label"><span class="state state-(\w+)">', page)
-        self.assertIsNotNone(selected, 'no category entry is selected')
-        self.assertEqual(selected.group(1), escapes.ESCAPED)
-        self.assertEqual(self.rows_rendered(page), 3)
+        self.assertEqual(self.selected_category(page), escapes.ESCAPED)
+        self.assertEqual(self.rows_rendered(page), 2)
 
     def test_both_halves_print_the_rate_increase_the_table_orders_them_by(self) -> None:
         """Inside one bucket a dash in a column the page sorts on is an order a reader cannot
-        account for, and the already-failing half is now the bulk of that bucket."""
+        account for, and the already-failing half is now the bulk of that bucket. Two rows, each with
+        the worst bound of the convictions behind it."""
         self._both_halves()
         page = self.page('/escapes')
-        self.assertEqual(len(re.findall(r'>(-?[\d.]+)%<span class="evidence">', page)), 3)
+        figures = [cells[4] for cells in self.listing_rows(page)]
+        self.assertEqual(len(figures), 2)
+        for cell in figures:
+            self.assertRegex(cell, r'-?[\d.]+%')
 
-    def test_a_category_outside_the_bucket_prints_no_increase_and_does_not_sort_by_it(self) -> None:
-        """The rate increase is printed only for the verdicts in the merged bucket, so elsewhere it is
-        neither the order nor a heading a reader can click: an arrow over a column of em dashes sorted
-        the rows by a figure that was not on the page."""
+    def test_a_category_outside_the_bucket_carries_neither_after_the_landing_column(self) -> None:
+        """Both figures are the merged bucket's own, so elsewhere the columns are absent rather than a
+        column of em dashes: at 1200px the pair reserved 266px of a 908px table to print a dash on every
+        row, and sorting by either was an order over a figure that was not on the page."""
         self._escape(1, 'fast/contained.html', runs_after=100, failed_after=0,
                      verdict=escapes.CONTAINED)
         page = self.page(f'/escapes?verdict={escapes.CONTAINED}')
-        self.assertNotRegex(page, r'>-?[\d.]+%<span class="evidence">')
-        self.assertIn('<th class="numeric">Rate increase</th>', page)
-        self.assertRegex(page, r'<th class="sortable when sorted">.*?Landed'
-                               r'<span class="arrow">▾</span>')
+        self.assertEqual([len(cells) for cells in self.listing_rows(page)], [4])
+        table = page.split('<table class="table full-width convictions">')[1].split('</table>')[0]
+        for label in ('Rate increase', 'Current damage'):
+            self.assertNotIn(label, table, label)
+        self.assertRegex(page, r'<th class="sortable when sorted"[^>]*aria-sort="descending"[^>]*>'
+                               r'.*?Landed</a><span class="arrow" aria-hidden="true">▾</span>')
 
     def test_no_split_is_shown_where_neither_half_reached_anything(self) -> None:
         self._escape(1, 'fast/contained.html', runs_after=100, failed_after=0,

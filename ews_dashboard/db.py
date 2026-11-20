@@ -62,10 +62,17 @@ def register_functions(connection: sqlite3.Connection) -> None:
 
     `deterministic=True` lets sqlite treat a call as constant for one row, which is what an ORDER BY
     over a function of two stored columns wants; both functions are pure.
+
+    The aggregates are the same argument one step up: a grouped escapes row reduces many convictions to
+    one figure, and neither the group's latest currency answer nor the conviction that supplied its
+    worst rate increase is a sum, a mean or a bare column beside `MAX()`. `create_aggregate` takes no
+    `deterministic` flag, so they are registered on their own.
     """
     from ews_dashboard.analysis import escapes
     for name, arity, function in escapes.SQL_FUNCTIONS:
         connection.create_function(name, arity, function, deterministic=True)
+    for name, arity, aggregate in escapes.SQL_AGGREGATES:
+        connection.create_aggregate(name, arity, aggregate)
 
 
 def connect(path: Optional[str] = None) -> sqlite3.Connection:

@@ -145,8 +145,11 @@ _MEMBERSHIP = (
 
 # Each of these describes the whole group a column's rows were collapsed into rather than one row of
 # it, so every one is `grouped` even though a column like `verdict.rule` is not itself an aggregate.
-# There is no `is set`/`is not set` here: the query that groups these rows already constrains the
-# column to `IS NOT NULL`, so a presence operator on the group would be a control that does nothing.
+# There is no `is set`/`is not set` here, and the reason is a predicate rather than the grouping:
+# `flakiness_verdicts.rule` is nullable in the schema, and both listings that group by it read a
+# conviction as a flakiness verdict that HAS a rule, so each spells `verdict.rule IS NOT NULL` into its
+# own WHERE — `analysis.convictions.convicted_tests` inline, `analysis.escapes` as `CONVICTED`. Under
+# that predicate a presence operator on the group can never narrow anything.
 _SET = (
     _operator('anyof', 'any of',
               'SUM(CASE WHEN {expression} IN ({placeholders}) THEN 1 ELSE 0 END) > 0',
@@ -171,8 +174,8 @@ def _by_name(operators: tuple) -> dict:
     return {operator.name: operator for operator in operators}
 
 
-# `off` alone, not the rest of `_PRESENCE`: a set operator already covers presence, since the query
-# that groups these rows constrains the column to `IS NOT NULL` before any of them run.
+# `off` alone, not the rest of `_PRESENCE`: a set operator already covers presence, under the same
+# `verdict.rule IS NOT NULL` predicate the block above cites.
 _OFF = tuple(operator for operator in _PRESENCE if operator.name == 'off')
 
 # Which operators each kind allows. A kind mismatch is a miss in this dict, so asking for `gt` on a
@@ -209,11 +212,13 @@ class Column:
     without selecting any aggregate at all and so has no alias in scope; `order_expression` keeps
     using the alias, which the page's own query does select.
 
-    `nulls_last` is for a column whose NULL means no evidence was gathered rather than a low value —
-    a rate increase with nothing on one side of the landing, a damage nobody has checked. sqlite sorts
-    NULL first ascending, so without it an ascending page leads with the rows that answer nothing; with
-    it they sort last in both directions, because a row with no evidence must not outrank one that has
-    some whichever way a reader reads the column.
+    `nullable` is for a column whose NULL means no evidence was gathered rather than a low value — a
+    rate increase with nothing on one side of the landing, a damage nobody has checked. It decides two
+    things at once, so the two cannot drift apart. Those rows sort last in both directions, because
+    sqlite sorts NULL first ascending and a row with no evidence must not outrank one that has some
+    whichever way a reader reads the column. And the column keeps `set`/`unset`, which is the only way
+    a reader can ask for exactly those rows: "which tests has nobody asked main about" is one
+    `damage:unset` clause, and nothing else in the grammar says it.
     """
 
     name: str
@@ -225,7 +230,7 @@ class Column:
     sortable: bool = True
     filterable: bool = True
     descending_first: bool = True
-    nulls_last: bool = False
+    nullable: bool = False
 
     @property
     def order_expression(self) -> str:
@@ -234,9 +239,9 @@ class Column:
     @property
     def operators(self) -> dict:
         operators = OPERATORS[self.kind]
-        if self.aggregate:
-            # An aggregate expression is never NULL over a grouped row, so `set`/`unset` can never
-            # narrow anything; drop them the way ENUM_SET drops all but `off` of `_PRESENCE`.
+        if self.aggregate and not self.nullable:
+            # `set`/`unset` on an aggregate that cannot be NULL over a group is a control that can
+            # never narrow anything; drop it the way ENUM_SET drops all but `off` of `_PRESENCE`.
             return {name: operator for name, operator in operators.items()
                     if operator.name not in ('set', 'unset')}
         return operators
@@ -273,6 +278,12 @@ def _table(name: str, tiebreak: str, columns: tuple) -> Table:
 
 SUITE_NAMES = tuple(suite.name for suite in suites.SUITES)
 
+# One conviction's rate increase, spelled once: the ESCAPES registry wraps it in the MAX a grouped row
+# shows, and `analysis.escapes` reuses this unwrapped form for the aggregate that names which
+# conviction supplied that maximum. Two spellings of one call is two places for the arguments to drift.
+ESCAPE_INCREASE = (f'{config.ESCAPE_INCREASE_FUNCTION}(outcome.runs_before, outcome.failed_before, '
+                   'outcome.runs_after, outcome.failed_after)')
+
 # `queue` has no fixed vocabulary here because the queues that exist are whatever has builds in the
 # window a page is reading, not a constant; an open vocabulary still binds its value.
 TESTS = _table(
@@ -292,9 +303,13 @@ TESTS = _table(
     ),
 )
 
-# The escapes page's listing, which is one row per (build, test) rather than a grouped one — so no
-# column here is an aggregate and none is an ENUM_SET, and `clause` can never hand that query a
-# HAVING it has no GROUP BY to attach.
+# The escapes page's listing, which is one row per TEST inside the open verdict category: a row is
+# every conviction of that test main answered that way, collapsed. So most of these columns are
+# aggregates, and which half of the query a condition lands in is decided here rather than by the
+# caller — `clause` sends an aggregate or a set operator to HAVING, over the group a row shows, and
+# everything else to WHERE, where it narrows which convictions the group is built from. A test is
+# therefore listed when ANY of its convictions matches a per-conviction clause (`queue`, `verdict`),
+# and when the GROUP matches an aggregate one (`increase`, `landed`, `convictions`).
 #
 # `sortable=False` where an order would ship a grade this dashboard does not hold, which is the
 # judgment TESTS already makes for `rule`, `queue` and `suite`: rule, queue and verdict are names of
@@ -304,31 +319,45 @@ TESTS = _table(
 # `descending_first` follows what a column is read for: a rate, a count and a time are being asked
 # "which is worst" so they descend first, and a test name is being looked up so it ascends first.
 #
+# Every aggregate is the reduction the cell prints and never a pooled count: MAX for the rate increase
+# is the group's worst single conviction, MIN for the landing is the earliest of them, and the damage is
+# a registered aggregate that reads the group's LATEST currency check. The four stored counts either
+# side of the landing are not here at all. They were, as two independent `MAX()`es, and a group holding
+# (100 runs, 1 failure) and (10 runs, 9 failures) then offered the pair (100, 9) that no conviction
+# produced — so `failed_after:ge:5` with `runs_after:le:20` matched a group no single conviction
+# satisfied, and the listing printed neither figure for a reader to check it against. One conviction's
+# pair is in that conviction's own row of the drilldown.
+#
+# `rule` is `ENUM_SET` rather than `ENUM` because a row carries every rule that convicted the test, and
+# that deliberately retires `eq`/`ne`/`in`/`notin` here: `eq` asked about one conviction, and over a
+# group there are two different questions where there was one. `anyof` with a single value is "some
+# conviction of this test carries that rule", `exactly` with a single value is "that rule is the only
+# one the group carries", and no one operator means both.
+#
 # Rate increase and damage are percentages rather than fractions, so that the number a reader filters
 # against is the number the page prints ("at least 50" beside a cell reading 50%). Both are the
-# registered sqlite function and NOT a formula re-spelled here: two definitions of the same figure that
-# can drift is exactly what deriving it on read exists to prevent.
+# registered sqlite function or aggregate and NOT a formula re-spelled here: two definitions of the same
+# figure that can drift is exactly what deriving it on read exists to prevent.
 ESCAPES = _table(
     'escapes',
-    # The primary key of escape_verdicts, so every page of every order is a total order.
-    'outcome.build_id DESC, outcome.test_name ASC',
+    # The group key, which is unique per row, so every page of every order is a total order.
+    'outcome.test_name ASC',
     (
         Column('test', 'Test', 'outcome.test_name', TEXT, descending_first=False),
-        Column('rule', 'Flake type', 'verdict.rule', ENUM, vocabulary=config.FLAKINESS_RULES,
+        Column('rule', 'Rule', 'verdict.rule', ENUM_SET, vocabulary=config.FLAKINESS_RULES,
                sortable=False, descending_first=False),
         Column('queue', 'Queue', 'build.builder', ENUM, sortable=False, descending_first=False),
         Column('verdict', 'What main said', 'outcome.verdict', ENUM,
                vocabulary=config.ESCAPE_VERDICTS, sortable=False, descending_first=False),
-        Column('landed', 'Landed', 'outcome.landed_at', TIMESTAMP, nulls_last=True),
-        Column('increase', 'Rate increase (%)',
-               f'{config.ESCAPE_INCREASE_FUNCTION}(outcome.runs_before, outcome.failed_before, '
-               'outcome.runs_after, outcome.failed_after) * 100',
-               INTEGER, nulls_last=True),
+        Column('convictions', 'Convictions', 'COUNT(*)', INTEGER, aggregate=True),
+        Column('landed', 'Landed', 'MIN(outcome.landed_at)', TIMESTAMP, aggregate=True,
+               nullable=True),
+        Column('increase', 'Rate increase (%)', f'MAX({ESCAPE_INCREASE} * 100)', INTEGER,
+               aggregate=True, nullable=True),
         Column('damage', 'Current damage (%)',
-               f'{config.ESCAPE_DAMAGE_FUNCTION}(outcome.recent_runs, outcome.recent_failed) * 100',
-               INTEGER, nulls_last=True),
-        Column('runs_after', 'Runs after landing', 'outcome.runs_after', INTEGER),
-        Column('failed_after', 'Failures after landing', 'outcome.failed_after', INTEGER),
+               f'{config.ESCAPE_CURRENT_DAMAGE_FUNCTION}(outcome.recent_checked_at, '
+               'outcome.recent_runs, outcome.recent_failed) * 100',
+               INTEGER, aggregate=True, nullable=True),
     ),
 )
 
@@ -367,7 +396,7 @@ class SortKey:
 
     @property
     def sql(self) -> str:
-        """The ORDER BY term, with a `nulls_last` column's NULLs pushed to the end of both directions.
+        """The ORDER BY term, with a `nullable` column's NULLs pushed to the end of both directions.
 
         Spelled `<expression> IS NULL ASC` rather than with `NULLS LAST`: it is the same order, it
         needs no minimum sqlite version, and `order_by`'s dedupe is by column name so the extra term
@@ -375,7 +404,7 @@ class SortKey:
         """
         direction = DESCENDING.upper() if self.descending else ASCENDING.upper()
         ordered = f'{self.column.order_expression} {direction}'
-        if self.column.nulls_last:
+        if self.column.nullable:
             return f'{self.column.order_expression} IS NULL ASC, {ordered}'
         return ordered
 

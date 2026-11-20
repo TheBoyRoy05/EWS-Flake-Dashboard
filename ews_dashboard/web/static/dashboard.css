@@ -9,11 +9,27 @@
     --panel-hover: #262d3a;
     --border: #2b323d;
     --border-soft: #232936;
+    /* A control's own edge, unlike the two above it, is the only thing telling a reader where a
+       select or a text field begins, so WCAG 1.4.11 asks 3:1 of it. `--border` measured 1.16:1
+       against the chip it sits on. The table borders keep `--border`: they separate rows a reader
+       already reads by their content, and are not the boundary of anything operable. */
+    --border-control: #6b7586;
     --ink: #e7eaf0;
     --muted: #98a2b2;
-    --faint: #6f7a8a;
+    /* The faint tier carries tallies, splits, count pairs, chip labels and the sort arrow. At
+       #6f7a8a it reached 3.80:1 on `--panel` and 3.44:1 on `--panel-raised`, under the 4.5:1 that
+       12.48px text needs; this clears both (5.21 and 4.72) and stays 6.3 L* below `--muted`, which
+       is what keeps the two tiers apart. */
+    --faint: #8592a6;
     --accent: #6ba4f8;
-    --accent-soft: rgba(107, 164, 248, 0.14);
+    /* The selected/active tint, laid over `--panel`, `--panel-raised` and `--bg` alike. As a 14%
+       wash of `--accent` it LIGHTENED the surface by 0.017 relative luminance, which took the faint
+       tally on a selected row to 2.99:1 and the ESCAPED pill to 3.96:1 — text that was legible one
+       row up. A deep blue subtracts luminance instead of adding it, so a tinted row is no longer a
+       worse background than the panel it sits on, and every text colour that reads on the panel
+       still reads here. Deliberately blue-dominant: the blue channel is 7% of luminance and the
+       green 72%, so the hue can be strong while the wash stays dark. */
+    --accent-soft: rgba(16, 40, 112, 0.42);
 
     --good: #5fcb8e;
     --good-bg: rgba(95, 203, 142, 0.12);
@@ -321,9 +337,9 @@ code {
 .table th {
     text-align: left;
     padding: 6px 10px;
-    color: var(--faint);
+    color: var(--ink);
     font-size: var(--tiny);
-    font-weight: 500;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     border-bottom: 1px solid var(--border);
@@ -393,8 +409,23 @@ code {
 
 .pane.queues { flex: 0 0 260px; }
 .pane.builds { flex: 0 0 300px; }
-.pane.categories { flex: 0 0 300px; }
 .pane.detail { flex: 1 1 auto; }
+/* One test's convictions, beside the listing at every width. They shared the row only above 1799px
+   before, and took their own line under the listing below that — which is every laptop, so the pane a
+   reader opens beside a row was never actually beside it. The 300px category rail is what the row
+   could not afford: it is a chip strip above the tables now (`.category-strip`), and the 312px it
+   gave back is what lets both tables stand in the row.
+
+   The split is not even, so this row is a grid rather than two flex items: the drilldown holds six
+   short columns whose widths its own content decides, and every pixel past them belongs to the
+   listing's test path. `min-content` holds the drilldown at exactly what its columns need and hands
+   the remainder to `minmax(0, 1fr)`, which may also shrink below its content — the listing's body
+   scrolls in that case rather than the row pushing the page wider than the viewport. Scoped by its own
+   class, since `/explore` renders three flex-sized panes in a `.panes` row and must keep them. */
+.panes.escapes-panes {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(min-content, 46%);
+}
 .pane > .head {
     display: flex;
     align-items: baseline;
@@ -408,12 +439,13 @@ code {
     font-size: var(--tiny);
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--faint);
+    color: var(--ink);
+    font-weight: 600;
 }
 
 .pane > .head .tally {
     font-size: var(--tiny);
-    color: var(--faint);
+    color: var(--muted);
     font-variant-numeric: tabular-nums;
 }
 
@@ -424,18 +456,39 @@ code {
     padding: 6px;
 }
 
-/* The convictions pane's header carries a title, a count and the filter disclosure. The disclosure
-   claims a whole line of its own (dashboard.css:.table-filter), so the two texts only ever share the
-   first line — but they were still breaking inside themselves when that line got short: "Convictions
-   main answered ESCAPED" broke before its verdict badge and "1-200 of 349, 149 more after this page"
-   before "more". Neither text gives width now, and the line wraps between them instead. */
+/* Title, count and the filter pill share one line. The pill's form opens as a popup anchored under
+   it, so opening never reflows the head and the pill stays under the pointer that clicked it. */
 #convictions > .head {
     flex-wrap: wrap;
+    justify-content: flex-start;
 }
 
 #convictions > .head .name,
 #convictions > .head .tally {
     flex: 0 0 auto;
+}
+
+#convictions > .head .tally {
+    margin-left: auto;
+}
+
+#convictions > .head > .table-filter {
+    flex-basis: auto;
+    position: relative;
+}
+
+#convictions > .head > .table-filter > .filter-form {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 20;
+    width: max-content;
+    max-width: min(40rem, 90vw);
+    padding: 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 }
 
 /* One row in a pane, drilling one level right */
@@ -456,6 +509,19 @@ code {
 .entry.selected {
     background: var(--accent-soft);
     border-left-color: var(--accent);
+}
+
+/* `--panel-hover` is the one surface in this file LIGHTER than `--panel-raised`, so it is the one
+   place the faint tier still lands under 4.5:1 (4.36) after the variable was raised. Both hover
+   rules that use it — the rail row here and the queue picker's tree row — already lift their own
+   text to `--ink`; a tally sets its own colour and so was left behind. Raising the tier further
+   would close the gap to `--muted` everywhere for the sake of one transient state, so the tally
+   borrows `--muted` for the duration of the hover instead. */
+.entry:hover .when,
+.entry:hover .tally,
+.queue-tree .node > .row:hover .tally,
+.queue-tree .leaf-node > label:hover .tally {
+    color: var(--muted);
 }
 
 .entry.noise {
@@ -501,7 +567,8 @@ code {
 .subcategories .split {
     display: block;
     margin: 4px 0 2px;
-    color: var(--faint);
+    color: var(--ink);
+    font-weight: 600;
 }
 
 .subcategories .line {
@@ -509,7 +576,7 @@ code {
     align-items: baseline;
     justify-content: space-between;
     gap: 8px;
-    color: var(--muted);
+    color: var(--ink);
 }
 
 .subcategories .tally {
@@ -566,6 +633,92 @@ code {
     background: var(--panel-raised);
     border-color: var(--border);
     color: var(--muted);
+}
+
+/* The verdict chooser, a strip above the two escape tables rather than a 300px rail beside them. A
+   chip is the `.state` pill the listing's head and the splits already wear, made clickable and given
+   its count, so the strip reads as the page header's window and suite chip rows read and nothing new
+   is introduced. These rules come after `.state-*` on purpose: they override the pill's own box, never
+   its colours. */
+.category-chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 2px 9px;
+    text-decoration: none;
+}
+
+.category-chip:hover {
+    text-decoration: none;
+    background-image: linear-gradient(rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.07));
+}
+
+.category-chip > .tally {
+    color: inherit;
+    opacity: 0.75;
+    font-variant-numeric: tabular-nums;
+}
+
+/* The chosen chip cannot be marked by a fill the way a `.badge.active` is: the fill is already spent
+   saying what main said, and a second tint on top of it reads as a sixth verdict colour. A ring, a
+   heavier weight and `aria-current` instead — three signals, none of them colour alone. */
+.category-chip.chosen {
+    box-shadow: 0 0 0 2px var(--accent);
+    font-weight: 600;
+}
+
+.category-strip > .header .tally {
+    font-size: var(--tiny);
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* A section header spreads its parts to both ends — `.header` is a bare class the page's own top bar
+   defines, `justify-content: space-between`, and `.section > .header .chooser` adds an auto margin on
+   top of it. Both are wrong here: the splits below belong to ONE of these chips, and a chip row parked
+   at the right edge left the escaped chip a third of a page from the numbers that break it down. Title,
+   count and chips read left to right instead, the way the page header's own `Window` and `Suite` rows
+   read. */
+.category-strip > .header {
+    justify-content: flex-start;
+}
+
+.category-strip > .header .chooser {
+    margin-left: 0;
+}
+
+/* The splits as three equal columns across the strip. Each line prints its count first, right-aligned
+   in a narrow column, then its label: a count beside its label never drifts to the far edge of a wide
+   column, and the counts line up for comparison. Scoped to the strip, so the class keeps its indented
+   form anywhere else it appears. */
+.category-strip .subcategories {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2px var(--gap);
+    margin: 0;
+    padding: 0;
+    border-left: none;
+}
+
+.category-strip .split-group {
+    min-width: 0;
+}
+
+.category-strip .subcategories .line {
+    display: grid;
+    grid-template-columns: 4.5em auto;
+    justify-content: start;
+    column-gap: 10px;
+}
+
+.category-strip .subcategories .line > .tally {
+    order: -1;
+    text-align: right;
+    color: var(--ink);
+}
+
+.category-strip .split-group > .split:first-child {
+    margin-top: 0;
 }
 
 /* Build detail */
@@ -1052,7 +1205,7 @@ code {
     box-sizing: border-box;
     height: 1.9em;
     padding: 0 3px;
-    border: 1px solid var(--border-soft);
+    border: 1px solid var(--border-control);
     border-radius: var(--radius-small);
     background: var(--panel);
     color: inherit;
@@ -1116,9 +1269,11 @@ code {
     text-decoration: none;
 }
 
+/* The same 2px ring at the same inset as the two controls beside it in the chip, so the three read as
+   one control group under the keyboard and none of them is the one with the thin indicator. */
 .chip .chip-remove:focus-visible {
-    outline: 1px solid var(--accent);
-    outline-offset: 1px;
+    outline: 2px solid var(--accent);
+    outline-offset: -3px;
 }
 
 .table-filter .actions {
@@ -1144,16 +1299,28 @@ code {
 .table-filter select {
     padding: 3px 6px;
     border-radius: var(--radius-small);
-    border: 1px solid var(--border);
+    border: 1px solid var(--border-control);
     background: var(--bg);
     color: var(--ink);
     font: inherit;
     font-size: var(--tiny);
 }
 
+/* A recoloured 1px border was the whole focus indicator here. 2.4.13 asks the indicator to cover at
+   least the area of a 2px perimeter of the control and to differ by 3:1 from the same pixels
+   unfocused, and a 1px swap is half that area. So the indicator is a 2px ring instead, and the
+   resting border is left alone: the border has its own 3:1 job under 1.4.11, which it cannot do in a
+   colour that also contrasts with `--accent`.
+
+   `outline-offset: -3px` is the ring's own 2px plus the 1px border it is pulled in behind, which is
+   what lands it on the control's own background rather than beside the control: measured pixel by
+   pixel, offset 0 paints the two pixels immediately OUTSIDE the border box, and each -1px moves the
+   band one pixel in. The ring therefore replaces interior pixels at 7.09:1, where at offset 0 half
+   the band would land on the chip's padding at 5.90:1 and the control would lose its own edge while
+   focused. An outline never takes part in layout at any offset, so nothing moves. */
 .table-filter select:focus {
-    outline: none;
-    border-color: var(--accent);
+    outline: 2px solid var(--accent);
+    outline-offset: -3px;
 }
 
 .table-filter input[type=number],
@@ -1161,7 +1328,7 @@ code {
 .table-filter input[type=text] {
     padding: 3px 6px;
     border-radius: var(--radius-small);
-    border: 1px solid var(--border);
+    border: 1px solid var(--border-control);
     background: var(--bg);
     color: var(--ink);
     font: inherit;
@@ -1171,8 +1338,8 @@ code {
 .table-filter input[type=number]:focus,
 .table-filter input[type=date]:focus,
 .table-filter input[type=text]:focus {
-    outline: none;
-    border-color: var(--accent);
+    outline: 2px solid var(--accent);
+    outline-offset: -3px;
 }
 
 .table-filter .vocabulary {
@@ -1382,47 +1549,82 @@ code {
     max-width: 44ch;
 }
 
-.table.convictions th:nth-child(4), .table.convictions td:nth-child(4) {
-    max-width: 60ch;
-}
-
-/* Queue was the one column with no ceiling, so the auto layout handed it the widest share of the
-   table's floor — 265px for a 35-character builder name, which left a long empty run between the name
-   and the right-aligned figure beside it. 24ch is the width the floor below already budgets for this
-   column: the longest builder name is 46 characters and breaks after a hyphen into two lines at that
-   width. A hyphenated name breaks on its own, so no `overflow-wrap` is needed here. */
-.table.convictions th:nth-child(3), .table.convictions td:nth-child(3) {
-    max-width: 24ch;
-}
-
-/* A test path and a whole sentence have no break point the browser would take on its own, so these two
-   are allowed to break inside a word. Cells only: their headers are the single words `Test` and `Why`,
-   which this would stack one letter per line (see `.table th`). */
-.table.convictions td:nth-child(1), .table.convictions td:nth-child(4) {
+/* A test path has no break point the browser would take on its own, so this column is allowed to break
+   inside a word. Cells only: the header is the single word `Test`, which this would stack one letter
+   per line (see `.table th`). */
+.table.convictions td:nth-child(1) {
     overflow-wrap: anywhere;
 }
 
-/* Measured from the width each column needs to stay READABLE, not from the width at which nothing
-   wraps: with eight columns and a test path among them, nothing-wraps is past 200ch and would scroll
-   on every screen there is. Test reads the 76-character path of a typical row in three lines at 26ch;
-   Rule is nowrap and `BetweenBuilds` is its longest name at 13 characters; Queue's longest value is a
-   single 46-character hyphenated builder name, which breaks after a hyphen into two lines at 24ch;
-   the fourth column is a count pair like `0/98` in the merged escape bucket and a phrase capped at
-   `escapes.REASON_WORDS` words elsewhere, whose longest reading is 31 characters over two lines at
-   18ch; Landed renders `YYYY-MM-DD` over `HH:MM UTC` at 10; Links stacks `PR`/`Build`/`History`, the
-   longest 7; and the last two headers wrap to `RATE`/`INCREASE` and `CURRENT`/`DAMAGE`, whose longest
-   words are 8 and 7 characters plus a sort arrow — each padded a few ch for the 6px/10px cell padding
-   on both sides, then summed: 26 + 16 + 24 + 18 + 14 + 13 + 13 + 12 = 136ch. Below that the pane
-   scrolls rather than shrink the columns further. Without this floor the table fell all the way to its
-   min-content width, which cut `Current damage` off at the pane's right edge and drove rows past
-   twenty lines, one path segment at a time.
+/* The two escape tables sit one under the other and their rows have to share a baseline. They did not:
+   a cell inherited its line height from its own font size, and the listing mixes both sizes (`Test`,
+   `Queues` and `Convictions` carry no `.text tiny`, the rest do), so one row stepped between 19.72px
+   and 18.096px and the drilldown ran entirely at 18.096px. One value for both tables instead, stated
+   once and derived from `--small` so it tracks the type scale. */
+.table.convictions th, .table.convictions td,
+.table.escape-convictions th, .table.escape-convictions td {
+    line-height: calc(var(--small) * 1.4);
+}
 
-   The fourth term was 36ch while that column held an English sentence, which made the floor 150ch and
-   handed every column a share of width its own content did not need — the empty run inside Queue that
-   read as wasted space came from there as much as from Queue having no ceiling of its own. The
-   sentence is gone (it is a count pair now), so the term went with it. */
-.table.convictions {
-    min-width: 136ch;
+/* `.table .numeric` and `.table .when` set `white-space: nowrap`, which is right for a figure and
+   wrong for the header above it: a sortable header carries its class on the `th`, so `Rate increase`
+   and `Current damage` were held on ONE line and each claimed the width of its whole label — 133px and
+   143px for five characters of data. Unpinned here they wrap to `RATE`/`INCREASE` and
+   `CURRENT`/`DAMAGE` and fall to 81px and 73px. Cells keep the nowrap they need.
+
+   `td.when` is the exception in the other direction. It holds one unbroken `YYYY-MM-DD HH:MM UTC`
+   string, so nowrap made it overflow its own cell and paint over the column beside it (`2026-09-18
+   07:40 U9C0.8%` — verified by rendering). It wraps between its words instead, never inside the date,
+   and carries a `min-width` below so the date itself always fits on one line. */
+.table.convictions th.numeric, .table.convictions th.when,
+.table.escape-convictions th.numeric, .table.escape-convictions th.when {
+    white-space: normal;
+}
+
+.table.convictions td.when, .table.escape-convictions td.when {
+    white-space: normal;
+    overflow-wrap: normal;
+}
+
+/* Half of this table's width was idle, held by headers rather than by data: at 1200px, 457px of 908px
+   was empty while the four narrow columns each stood at the min-content width of a header word. So the
+   106ch floor came off and every column except `Test` took a ceiling, which is what hands the spare
+   width to the path instead of spreading it. Each ceiling sits just above the column's own min-content
+   so nothing is squeezed into overflow — a ceiling BELOW min-content clips the header rather than
+   shrinking it, which is how `QUEUES` and `CONVICTIONS` were first broken here.
+
+   `Landed` takes a floor as well as a ceiling: it is the one column whose value must not wrap inside
+   itself, and without the floor the others pushed it to 66px and every row grew a line. 12ch is the
+   measured width of `2026-09-12` plus this column's 6px gutters; 13ch was a character of slack the row
+   cannot afford now that the drilldown shares it.
+
+   `Test`'s floor is 22ch rather than 26ch for the same reason: at 1200px the row has no surplus to
+   hand this column, so its floor is what it gets, and 26ch left the drilldown beside it scrolling.
+   Above about 1290px of pane the floor stops binding and every extra pixel lands here. */
+.table.convictions { min-width: 0; }
+
+.table.convictions th:nth-child(1), .table.convictions td:nth-child(1) {
+    min-width: 17ch;
+    max-width: none;
+}
+
+.table.convictions th:nth-child(2), .table.convictions td:nth-child(2) { max-width: 13ch; }
+.table.convictions th:nth-child(3), .table.convictions td:nth-child(3) { max-width: 14ch; }
+.table.convictions th:nth-child(4), .table.convictions td:nth-child(4) { min-width: 11ch; max-width: 15ch; }
+.table.convictions th:nth-child(5), .table.convictions td:nth-child(5) { max-width: 10ch; }
+.table.convictions th:nth-child(6), .table.convictions td:nth-child(6) { max-width: 9ch; }
+
+/* 10px of side padding is bought per column out of the width the header needed, and every column but
+   `Test` holds a value that reads the same at 6px: a count, a date, a percentage, or a rule name that
+   is one identifier either way. `Test` keeps the full gutter, since it is the one column whose value
+   wraps and needs the breathing room on both edges. */
+.table.convictions th:nth-child(2), .table.convictions td:nth-child(2),
+.table.convictions th:nth-child(3), .table.convictions td:nth-child(3),
+.table.convictions th:nth-child(4), .table.convictions td:nth-child(4),
+.table.convictions th:nth-child(5), .table.convictions td:nth-child(5),
+.table.convictions th:nth-child(6), .table.convictions td:nth-child(6) {
+    padding-left: 6px;
+    padding-right: 6px;
 }
 
 /* The pane body is the scroller the table overflows into, which is `.table-scroll`'s job for the
@@ -1472,15 +1674,188 @@ code {
     background: var(--border-soft);
 }
 
-/* A rule name is one identifier, so it wraps as a broken word rather than as two: the column is
-   told to keep it whole and given the width its longest name needs. */
+/* The row whose convictions are open beside the table. It carried `class="selected"` and no style at
+   all — the only `.selected` rule in this stylesheet targets `.entry`, which is the category rail — so
+   the pane opened with nothing on the page saying which row it belonged to. Marked the way the rail
+   marks its own selection, the same tint and the same 3px accent bar, so one treatment means one thing
+   on this page.
+
+   The tint has to be composited against `--panel` on the first cell rather than simply set: that cell
+   is `position: sticky` and needs an OPAQUE background, and `--accent-soft` is 14% alpha, which would
+   let the scrolled-under row show through. A gradient of the tint over the panel colour is one
+   background shorthand that is both.
+
+   The bar is a pseudo-element for the reason the trailing edge above is: under `border-collapse:
+   collapse` the table owns a cell's borders, and a box-shadow on a collapsed-border cell is not painted
+   at all. The cell is already positioned, so `::before` hangs off it directly. */
+.table.convictions tbody tr.selected > td {
+    background: var(--accent-soft);
+}
+
+#convictions .table.convictions tbody tr.selected > td:nth-child(1),
+#convictions .table.convictions tbody tr.selected:hover > td:nth-child(1) {
+    background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--panel);
+}
+
+#convictions .table.convictions tbody tr.selected > td:nth-child(1)::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 3px;
+    background: var(--accent);
+}
+
+/* A rule name is one identifier, so it wraps as a broken word rather than as two: the column keeps each
+   name whole and breaks between them, since a row now carries the distinct set of a test's rules
+   rather than one conviction's single rule. */
 .table.convictions td:nth-child(2) {
-    white-space: nowrap;
     overflow-wrap: normal;
 }
 
-.table.convictions .links a {
-    display: block;
+/* One test's convictions, in the pane beside the listing, sized the way the listing is: no floor, a
+   ceiling on every column whose content is a count or a date, and the spare width to the one column
+   holding a long value. Queue is that column — a builder name runs to 46 characters — so it takes
+   `width: 100%` and the five ceilings hold the rest at their measured widths. Left to distribute
+   freely, `Current damage` reached 295px for five characters at 1500px, which is the listing's own
+   idle-width defect one pane over.
+
+   This pane is the `min-content` track of the row (`.panes.escapes-panes`), so these floors are what
+   the pane costs the listing beside it at every width. Queue's is 14ch rather than 22ch and Landed's
+   12ch rather than 13ch for that reason. Queue costs nothing at 14ch: the `Links` cell beside it
+   already stands three lines tall, so a builder name wrapping to two or three lines does not make the
+   row any taller, and the 66px it gives back is 66px of test path in the table next to it. Landed stops
+   at 12ch because that is the measured width of `2026-09-12`, and a date that wraps adds a line to
+   every row of both tables. */
+.table.escape-convictions { min-width: 0; }
+
+.table.escape-convictions th:nth-child(1), .table.escape-convictions td:nth-child(1) {
+    min-width: 14ch;
+    max-width: none;
+    width: 100%;
+}
+
+.table.escape-convictions th:nth-child(2), .table.escape-convictions td:nth-child(2) { min-width: 12ch; max-width: 15ch; }
+.table.escape-convictions th:nth-child(4), .table.escape-convictions td:nth-child(4) { max-width: 10ch; }
+.table.escape-convictions th:nth-child(5), .table.escape-convictions td:nth-child(5) { max-width: 9ch; }
+.table.escape-convictions th:nth-child(6), .table.escape-convictions td:nth-child(6) { max-width: 8ch; }
+
+.table.escape-convictions th:nth-child(2), .table.escape-convictions td:nth-child(2),
+.table.escape-convictions th:nth-child(4), .table.escape-convictions td:nth-child(4),
+.table.escape-convictions th:nth-child(5), .table.escape-convictions td:nth-child(5),
+.table.escape-convictions th:nth-child(6), .table.escape-convictions td:nth-child(6) {
+    padding-left: 6px;
+    padding-right: 6px;
+}
+
+.table.escape-convictions .when {
+    white-space: normal;
+}
+
+.table.escape-convictions th:nth-child(3), .table.escape-convictions td:nth-child(3) {
+    max-width: 18ch;
+}
+
+/* Cells only, for the reason the listing's own first column gives: `Why` is one word and a header that
+   breaks inside it reads as a letter stack. */
+.table.escape-convictions td:nth-child(3) {
+    overflow-wrap: anywhere;
+}
+
+/* PR, Build and History on one line with a separator between them. Stacked, three links set the row's
+   height while carrying one line of meaning, so a row spent 70px to print a date, two count pairs and a
+   percentage. A separator rather than whitespace alone, because three bare words in a row read as one
+   phrase. */
+.table.escape-convictions .links {
+    white-space: nowrap;
+}
+
+/* One line per conviction: the queue label and each figure with its count pair beside it rather than
+   under it, so a row costs one line instead of two. */
+.table.escape-convictions td[role="rowheader"]:not(.when) {
+    white-space: nowrap;
+}
+
+.table.escape-convictions td.numeric {
+    max-width: none;
+}
+
+.table.escape-convictions td.numeric .evidence {
+    display: inline;
+    margin-left: 6px;
+}
+
+/* The headline figures, left of the splits they summarise, instead of two cards above the strip. */
+.category-strip .strip-body {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    column-gap: calc(var(--gap) * 2);
+    align-items: start;
+}
+
+.category-strip .strip-figures .figure {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+}
+
+.category-strip .strip-figures .figure + .figure {
+    margin-top: 6px;
+}
+
+.category-strip .strip-figures .value {
+    min-width: 3.2em;
+    text-align: right;
+    font-size: 1.5rem;
+    font-weight: 600;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+}
+
+.category-strip .strip-figures .label {
+    color: var(--ink);
+}
+
+.pane.escape-detail > .head .history {
+    flex: 0 0 auto;
+}
+
+/* Under this width both tables cannot keep one-line rows: a queue label wrapping at its hyphens costs
+   the drilldown one extra line per row, where the same width taken from the listing cost its test
+   paths four to six lines (measured at 1200px). */
+@media (max-width: 1299px) {
+    .table.escape-convictions td[role="rowheader"]:not(.when) {
+        white-space: normal;
+    }
+}
+
+.table.escape-convictions .links a + a::before {
+    content: ' · ';
+    color: var(--faint);
+}
+
+/* The drilldown's head names a TEST PATH, not a section. `.pane > .head .name` uppercases its title,
+   which on a case-sensitive path is both wrong and three lines of capitals; mono at normal case reads as
+   the identifier it is and fits on one. Scoped to this pane, since every other pane's head really does
+   hold a label. */
+.pane.escape-detail > .head .name {
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: ui-monospace, Menlo, monospace;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.pane.escape-detail > .head .tally {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+/* The drilldown's body is the scroller its table overflows into, the way `#convictions > .body` is for
+   the listing: neither table can take a `.table-scroll` wrapper without changing the pane's markup. */
+.pane.escape-detail > .body {
+    overflow-x: auto;
 }
 
 .table.convicted-tests th:nth-child(1), .table.convicted-tests td:nth-child(1) {
@@ -1528,13 +1903,7 @@ code {
     white-space: nowrap;
 }
 
-/* The selected verdict's meaning, between the detail pane's head and the list it explains. Padded
-   like .note rather than reusing it, since .note carries the warning colours. */
-.pane > .meaning {
-    margin: 0;
-    padding: 9px var(--pad);
-    border-bottom: 1px solid var(--border-soft);
-}
+
 
 /* The sortable headers above a convicted-test table, and the pager under it. Both are markup the
    browser resolves on its own, since this app needs no JavaScript. */

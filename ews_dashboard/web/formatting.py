@@ -8,9 +8,11 @@ asked about flakiness is not a queue that asked and convicted nothing.
 from __future__ import annotations
 
 import datetime
+import re
 from typing import Optional
 
 from flask import Flask
+from markupsafe import Markup, escape
 
 from ews_dashboard.analysis import false_positive
 
@@ -109,6 +111,20 @@ def clock(value: Optional[int]) -> str:
     return at.strftime('%H:%M UTC')
 
 
+def queue_label(builder: str) -> str:
+    """Every EWS queue ends in `-EWS` and most in `-Tests-EWS`, so the suffix names nothing a reader
+    compares on; dropping it keeps `...-API-Tests-EWS` and `...-WK2-Tests-EWS` apart."""
+    return builder.removesuffix('-EWS').removesuffix('-Tests')
+
+
+def path_breaks(path: str) -> Markup:
+    """A test path offers the browser no break point, so it either overflows or breaks mid-word.
+    Allowing a break after each separator, and inside a camel-case API test name, wraps it at the
+    joints a reader already parses it by."""
+    breakable = re.sub(r'([/.\-_])', r'\1<wbr>', str(escape(path)))
+    return Markup(re.sub(r'([a-z])([A-Z])', r'\1<wbr>\2', breakable))
+
+
 def age(seconds: Optional[int]) -> str:
     if seconds is None:
         return 'never'
@@ -134,7 +150,8 @@ def duration(seconds: Optional[int]) -> str:
 def register(app: Flask) -> None:
     for name, function in (('percent', percent), ('count', count), ('moment', moment), ('day', day),
                            ('clock', clock), ('age', age), ('duration', duration), ('state', state),
-                           ('state_class', state_class)):
+                           ('state_class', state_class), ('queue_label', queue_label),
+                           ('path_breaks', path_breaks)):
         app.jinja_env.filters[name] = function
     app.jinja_env.globals['blames_noise'] = BLAMES_NOISE
     app.jinja_env.globals['any_state'] = ANY_STATE

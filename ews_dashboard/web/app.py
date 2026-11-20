@@ -829,7 +829,7 @@ def _page_asked_for() -> int:
 
     A page that is not a number, or is below the first, is the first rather than a refusal — the
     argument arrives in a hand-edited URL as readily as from a link, and every other filter on these
-    pages drops what it cannot read. A page past the last is clamped by `escapes.convictions`, which
+    pages drops what it cannot read. A page past the last is clamped by `escapes.answered_tests`, which
     is the only place that knows how many there are.
     """
     try:
@@ -845,6 +845,15 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
     Read-only like the others. Deciding an escape needs results.webkit.org and a checkout, so this
     page shows what the refresh has already decided and says how much it could not.
 
+    The listing is one row per TEST inside the open category, and `test=` opens that test's own
+    convictions beside it, the way `/tests` opens a convicted test's. The drilldown reads through the
+    same predicate as the row above it, the reader's own clauses included, so the pane lists exactly the
+    convictions that row's count was taken over. Withholding them here is what made a row read 15
+    convictions beside a pane reading 90 — and the pane is the only place a reader can check the row's
+    figures against the convictions behind them. The clauses that describe the group rather than a
+    conviction are the HAVING half, which `escapes.test_convictions` leaves alone: they chose which tests
+    the listing holds, and inside one test there is no group left for them to narrow.
+
     The listing is filtered, ordered and paged by the `f.escapes=`/`s.escapes=`/`page=` arguments,
     every column name in them validated against `filters.ESCAPES` before any of it reaches SQL. The
     verdict category the pane selects is applied on top of a reader's own clauses rather than by
@@ -859,6 +868,8 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
     """
     scope = _scope(open_connection, window)
     verdict_shown = escapes.category_of(_chosen('verdict', escapes.VERDICTS, escapes.ESCAPED))
+    shown_verdicts = escapes.category_verdicts(verdict_shown)
+    test_filter = request.args.get('test') or None
     asked = filters.requested(_canonical_filter_arguments(filters.ESCAPES), filters.ESCAPES)
     filter_removals, sort_removals = _clause_removals('escaped_regressions', filters.ESCAPES, asked,
                                                       'convictions')
@@ -866,11 +877,16 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
     primary = _primary_sort(filters.ESCAPES, asked.sort_keys,
                             ESCAPES_DEFAULT_SORT if shows_increase
                             else ESCAPES_WITHOUT_INCREASE_SORT)
-    listed = escapes.convictions(open_connection, window.since, window.until,
-                                 escapes.category_verdicts(verdict_shown),
-                                 suite=scope.suite, builders=scope.builders,
-                                 page=_page_asked_for(), conditions=asked.conditions,
-                                 sort_keys=_escape_order(asked.sort_keys, shows_increase))
+    listed = escapes.answered_tests(open_connection, window.since, window.until, shown_verdicts,
+                                    suite=scope.suite, builders=scope.builders,
+                                    page=_page_asked_for(), conditions=asked.conditions,
+                                    sort_keys=_escape_order(asked.sort_keys, shows_increase))
+    drilldown = (
+        escapes.test_convictions(open_connection, window.since, window.until, shown_verdicts,
+                                 test_filter, suite=scope.suite, builders=scope.builders,
+                                 conditions=asked.conditions)
+        if test_filter else None
+    )
     counted = escapes.tally(open_connection, window.since, window.until,
                             suite=scope.suite, builders=scope.builders)
     subcategories = escapes.escape_subcategories(open_connection, window.since, window.until,
@@ -890,6 +906,10 @@ def _escapes_context(open_connection: sqlite3.Connection, window: Window) -> dic
         escape_verdicts=escapes.MERGED_ESCAPE_VERDICTS,
         subcategories=subcategories,
         listed=listed,
+        test_filter=test_filter,
+        drilldown=drilldown,
+        current_args=_carried_arguments(),
+        rule_descriptions=config.RULE_DESCRIPTIONS,
         verdict_shown=verdict_shown,
         reason=escapes.reason,
         verdict_descriptions=escapes.VERDICT_DESCRIPTIONS,
@@ -956,8 +976,11 @@ def _test_order(keys: tuple) -> tuple:
 
 
 def _escape_order(keys: tuple, shows_increase: bool = True) -> tuple:
-    """The sort keys behind a page of escape convictions: what the request asked for, then the rate
-    increase and landing time, then the tiebreak `filters` adds.
+    """The sort keys behind a page of the tests one category answered: what the request asked for, then
+    the rate increase and landing time, then the tiebreak `filters` adds.
+
+    Both fallbacks are grouped columns — the group's worst rate increase and its earliest landing — so a
+    page with no order of its own reads worst-landing-first over the rows it actually shows.
 
     A category that prints no rate increase falls back on landing time alone, so its rows are never
     ordered by a bound the table renders as an em dash.
